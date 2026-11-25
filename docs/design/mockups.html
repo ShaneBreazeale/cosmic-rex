@@ -1,0 +1,617 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cosmic-rex mockups</title>
+<style>
+/* Static mockups for docs/design/ux-spec.md. No scripts, no external requests. All data is invented.
+   Colours approximate the COSMIC default dark and light themes; the app reads the real theme. */
+:root{color-scheme:light dark}
+*{box-sizing:border-box}
+html{background:#e9eaec;color:#1c1d1f}
+body{margin:0;padding:32px 24px 64px;font:15px/1.5 "Open Sans","Noto Sans","DejaVu Sans",system-ui,sans-serif}
+@media (prefers-color-scheme:dark){html{background:#121314;color:#e4e5e7}.note{color:#a9abb0!important}}
+h1{font-size:24px;line-height:36px;margin:0 0 4px}
+h2{font-size:18px;line-height:28px;margin:48px 0 4px}
+.note{max-width:70ch;color:#55575c;margin:0 0 12px}
+.stage{overflow-x:auto;padding:8px 0 16px}
+.pair{display:flex;gap:24px;align-items:flex-start;flex-wrap:wrap}
+.legend{display:flex;flex-wrap:wrap;gap:8px 24px;padding:12px 16px;border-radius:8px;width:max-content;max-width:100%}
+
+/* ---- theme tokens ---- */
+.dark{--bg:#1b1b1b;--surface:#272727;--comp:#343434;--text:#e8e8e8;--text2:#b4b4b4;--text3:#8d8d8d;
+  --line:rgba(255,255,255,.10);--line2:rgba(255,255,255,.22);--accent:#63d0df;--on-accent:#06262b;--sel:rgba(99,208,223,.16);
+  --warn:#f7e062;--danger:#fda1a0;--ok:#92cf9c;--term-bg:#101214;--term-fg:#d4d7dc;--term-dim:#8a9099;--term-g:#8fd19e;--term-b:#7cb7ff;--term-y:#e6cf6a;
+  --hatch:rgba(255,255,255,.13);--shadow:0 16px 48px rgba(0,0,0,.55)}
+.light{--bg:#dcdcdc;--surface:#ebebeb;--comp:#f8f8f8;--text:#1b1b1b;--text2:#4a4a4a;--text3:#6a6a6a;
+  --line:rgba(0,0,0,.10);--line2:rgba(0,0,0,.26);--accent:#00525a;--on-accent:#ffffff;--sel:rgba(0,82,90,.13);
+  --warn:#7a5d00;--danger:#a3262c;--ok:#1d6b34;--term-bg:#fcfcfc;--term-fg:#24292e;--term-dim:#6b7280;--term-g:#1a7f37;--term-b:#0550ae;--term-y:#7a5d00;
+  --hatch:rgba(0,0,0,.12);--shadow:0 16px 48px rgba(0,0,0,.25)}
+
+/* ---- window ---- */
+.win{position:relative;background:var(--bg);color:var(--text);border:1px solid var(--line2);border-radius:12px;overflow:hidden;
+  font:14px/21px "Open Sans","Noto Sans","DejaVu Sans",system-ui,sans-serif;flex:none}
+.w-wide{width:1200px}.w-med{width:820px}.w-narrow{width:400px}
+.hb{height:48px;display:flex;align-items:center;gap:8px;padding:0 8px}
+.hb .mid{flex:1;display:flex;justify-content:center;min-width:0}
+.ib{width:32px;height:32px;border-radius:8px;display:inline-flex;align-items:center;justify-content:center;color:var(--text2);flex:none}
+.crumb{display:inline-flex;align-items:center;gap:8px;height:32px;padding:0 12px;border-radius:8px;background:var(--surface);min-width:0;white-space:nowrap}
+.crumb .sep{color:var(--text3)}
+.crumb b{font-weight:600}
+.attn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 14px;border-radius:160px;background:var(--surface);font-weight:600;white-space:nowrap}
+.attn.quiet{font-weight:400;color:var(--text2)}
+.body{display:flex;gap:8px;padding:0 8px 8px}
+.h-wide{height:612px}.h-narrow{height:560px}
+
+/* ---- shapes ---- */
+.sh{width:12px;height:12px;flex:none;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.sh.f{fill:currentColor;stroke:none}
+.c-warn{color:var(--warn)}.c-danger{color:var(--danger)}.c-ok{color:var(--ok)}.c-mid{color:var(--text2)}.c-low{color:var(--text3)}.c-acc{color:var(--accent)}
+.ic{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;flex:none}
+
+/* ---- identity ---- */
+.mono{width:20px;height:20px;border-radius:4px;color:#fff;font:600 11px/20px "Open Sans","Noto Sans",system-ui,sans-serif;text-align:center;flex:none;letter-spacing:.02em}
+.t0{--tint:#4f5fd0}.t1{--tint:#b0508c}.t2{--tint:#5a6878}.t3{--tint:#8a5a3c}.t4{--tint:#1f7fb0}.t5{--tint:#8452c2}
+.mono{background:var(--tint)}
+
+/* ---- sidebar ---- */
+.side{width:280px;flex:none;background:var(--surface);border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:2px;overflow:hidden}
+.box{display:flex;align-items:center;gap:8px;height:40px;padding:0 8px;font-weight:600}
+.box .st{margin-left:auto;display:inline-flex;align-items:center;gap:6px;font-size:12px;line-height:17px;font-weight:400;color:var(--text2)}
+.sess{display:flex;align-items:center;gap:8px;height:36px;padding:0 10px 0 22px;border-radius:8px;position:relative;white-space:nowrap}
+.sess .n{margin-left:auto;font-size:12px;color:var(--text2)}
+.sess.sel{background:var(--sel)}
+.sess.sel::before{content:"";position:absolute;left:8px;top:8px;bottom:8px;width:4px;border-radius:2px;background:var(--accent)}
+.sess.old{color:var(--text3)}
+.asof{font-size:12px;line-height:17px;color:var(--text3);padding:0 8px 2px 22px}
+.side .foot{margin-top:auto;display:flex;align-items:center;gap:8px;height:40px;padding:0 8px;color:var(--text2);border-top:1px solid var(--line)}
+.gap{height:6px}
+
+/* ---- content ---- */
+.main{flex:1;min-width:0;display:flex;flex-direction:column;gap:8px}
+.tabs{display:flex;align-items:center;gap:4px;height:40px;flex:none}
+.tab{display:inline-flex;align-items:center;gap:8px;height:32px;padding:0 14px;border-radius:8px;color:var(--text2);white-space:nowrap}
+.tab.on{background:var(--surface);color:var(--text);font-weight:600}
+.grid{flex:1;min-height:0;display:grid;gap:8px;grid-template-columns:1.1fr 1fr;grid-template-rows:1.35fr 1fr}
+.pane{position:relative;display:flex;flex-direction:column;min-width:0;min-height:0;background:var(--surface);border-radius:8px;overflow:hidden;outline:2px solid transparent;outline-offset:-2px}
+.pane.focus{outline-color:var(--accent)}
+.pane.span{grid-column:1 / -1}
+.ph{height:28px;flex:none;display:flex;align-items:center;gap:8px;padding:0 8px;font-size:12px;line-height:17px;border-top:2px solid var(--tint);white-space:nowrap}
+.ph .ttl{font-weight:600}
+.ph .sp{flex:1}
+.chip{display:inline-flex;align-items:center;gap:5px;height:20px;padding:0 8px;border-radius:160px;border:1px solid var(--line2);font-size:12px;line-height:17px;color:var(--text2);white-space:nowrap}
+.lb{flex:1;min-height:0;display:flex;justify-content:center;background:var(--surface)}
+.term{flex:1;min-height:0;margin:0;padding:6px 8px;background:var(--term-bg);color:var(--term-fg);font:12px/16px "Noto Sans Mono","DejaVu Sans Mono","Liberation Mono",monospace;white-space:pre;overflow:hidden}
+.lb .term{flex:none;width:86%}
+.d{color:var(--term-dim)}.g{color:var(--term-g)}.b{color:var(--term-b)}.y{color:var(--term-y)}
+.cur{background:var(--term-fg);color:var(--term-bg)}
+
+/* ---- paused pane ---- */
+.pane.paused .term{opacity:.5}
+.hatch{position:absolute;inset:30px 0 0 0;background:repeating-linear-gradient(135deg,transparent 0 10px,var(--hatch) 10px 12px)}
+.plate{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);background:var(--comp);color:var(--text);border:1px solid var(--line2);border-radius:8px;padding:8px 14px;display:flex;flex-direction:column;gap:2px;align-items:center;white-space:nowrap;box-shadow:var(--shadow)}
+.plate small{font-size:12px;line-height:17px;color:var(--text2)}
+.banner{display:flex;align-items:center;gap:10px;min-height:40px;padding:6px 12px;border-radius:8px;background:var(--surface);border:1px solid var(--line2);flex:none}
+.banner .sp{flex:1}
+
+/* ---- inbox ---- */
+.drawer{width:344px;flex:none;background:var(--surface);border-radius:8px;padding:8px 12px 12px;display:flex;flex-direction:column;gap:6px;overflow:hidden}
+.drawer .hd{display:flex;align-items:center;height:36px;font-weight:700;font-size:20px;line-height:30px}
+.drawer .hd .ib{margin-left:auto}
+.sec{font:600 12px/17px "Open Sans","Noto Sans",system-ui,sans-serif;color:var(--text2);margin:8px 2px 0;letter-spacing:.03em;text-transform:uppercase}
+.card{background:var(--comp);border-radius:8px;padding:10px 12px;display:flex;flex-direction:column;gap:4px}
+.card.sel{outline:2px solid var(--accent);outline-offset:-2px}
+.card.dim{opacity:.6}
+.r{display:flex;align-items:center;gap:8px;min-width:0;white-space:nowrap}
+.r .w{font-weight:600}
+.r .age{margin-left:auto;font-size:12px;color:var(--text2)}
+.where{font-size:12px;line-height:17px;color:var(--text2)}
+.q{border-left:2px solid var(--line2);padding-left:8px;font:12px/17px "Noto Sans Mono","DejaVu Sans Mono",monospace;color:var(--text2);white-space:normal}
+.cap{font-size:12px;line-height:17px;color:var(--text3)}
+.more{display:flex;align-items:center;gap:8px;height:36px;padding:0 4px;color:var(--text2)}
+.more .sp{flex:1}
+
+/* ---- overlays ---- */
+.scrim{position:absolute;inset:0;background:rgba(0,0,0,.4)}
+.dlg{position:absolute;left:50%;transform:translateX(-50%);background:var(--surface);color:var(--text);border-radius:16px;padding:24px;box-shadow:var(--shadow);border:1px solid var(--line);display:flex;flex-direction:column;gap:12px}
+.dlg h3{font-weight:700;font-size:20px;line-height:30px;margin:0}
+.dlg .step{font-size:12px;line-height:17px;color:var(--text2);margin-top:-8px}
+.frame{border:1px solid var(--line2);border-radius:8px;overflow:hidden}
+.frame>.lab{font-weight:600;font-size:12px;line-height:17px;color:var(--text2);padding:6px 10px;border-bottom:1px solid var(--line)}
+.frame>.q{margin:8px 10px;font-size:13px;line-height:19px;color:var(--text)}
+.frame>.term{font-size:12px;line-height:16px}
+.btns{display:flex;gap:8px;justify-content:flex-end;align-items:center;margin-top:4px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:32px;padding:0 16px;border-radius:160px;background:var(--comp);border:1px solid var(--line);white-space:nowrap}
+.btn.sug{background:var(--accent);color:var(--on-accent);border-color:transparent;font-weight:600}
+.btn.off{opacity:.45}
+.key{display:inline-flex;align-items:center;justify-content:center;min-width:32px;height:28px;padding:0 8px;border-radius:4px;border:1px solid var(--line2);background:var(--comp);font:12px/16px "Noto Sans Mono","DejaVu Sans Mono",monospace}
+.field{flex:1;height:32px;border-radius:8px;border:1px solid var(--line2);background:var(--comp);display:flex;align-items:center;gap:8px;padding:0 10px;color:var(--text3);min-width:0}
+.field.act{border:2px solid var(--accent);color:var(--text)}
+.row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.row .lbl{width:68px;font-size:12px;color:var(--text2);flex:none}
+.opt{display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:8px;background:var(--comp);border:1px solid var(--line)}
+.opt.sel{outline:2px solid var(--accent);outline-offset:-2px}
+.opt .tx{display:flex;flex-direction:column;min-width:0}
+.opt .tx small{font-size:12px;line-height:17px;color:var(--text2)}
+.opt .end{margin-left:auto;color:var(--text3)}
+.facts{display:grid;grid-template-columns:max-content 1fr;gap:4px 16px;font-size:13px;line-height:19px}
+.facts dt{color:var(--text2)}.facts dd{margin:0}
+.warnline{display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border-radius:8px;border:1px solid var(--line2)}
+.sw{display:flex;gap:6px}
+.sw i{width:20px;height:20px;border-radius:4px;background:var(--tint);display:block}
+.sw i.on{outline:2px solid var(--accent);outline-offset:2px}
+.res{display:flex;align-items:center;gap:8px;height:36px;padding:0 10px;border-radius:8px;white-space:nowrap}
+.res.sel{background:var(--sel)}
+.res .hint{margin-left:auto;font-size:12px;color:var(--text2)}
+.strip{display:flex;align-items:center;gap:8px;height:40px;padding:0 12px;border-radius:8px;background:var(--surface);flex:none;white-space:nowrap}
+.strip .sp{flex:1}
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="s-blocked" viewBox="0 0 12 12"><path d="M6 .6 11.4 6 6 11.4.6 6z"/></symbol>
+    <symbol id="s-error" viewBox="0 0 12 12"><path d="M2.4 2.4l7.2 7.2M9.6 2.4 2.4 9.6"/></symbol>
+    <symbol id="s-done" viewBox="0 0 12 12"><path d="M1.8 6.4 4.7 9.3l5.5-6.4"/></symbol>
+    <symbol id="s-working" viewBox="0 0 12 12"><circle cx="6" cy="6" r="4.3" stroke-dasharray="20.3 6.7" transform="rotate(-90 6 6)"/></symbol>
+    <symbol id="s-idle" viewBox="0 0 12 12"><circle cx="6" cy="6" r="2.8"/></symbol>
+    <symbol id="s-paused" viewBox="0 0 12 12"><circle cx="6" cy="6" r="4.3" stroke-dasharray="2.2 2.3"/></symbol>
+    <symbol id="s-off" viewBox="0 0 12 12"><circle cx="6" cy="6" r="4.3"/><path d="M3 9 9 3"/></symbol>
+    <symbol id="i-fit" viewBox="0 0 16 16"><path d="M9.5 3H13v3.5M13 3 9 7M6.5 13H3V9.5M3 13l4-4"/></symbol>
+    <symbol id="i-theirs" viewBox="0 0 16 16"><rect x="2.5" y="3.5" width="11" height="9" rx="1.5"/><rect x="5.5" y="6" width="5" height="4" rx=".5" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-menu" viewBox="0 0 16 16"><path d="M3 4.5h10M3 8h10M3 11.5h10"/></symbol>
+    <symbol id="i-dots" viewBox="0 0 16 16"><circle cx="3.5" cy="8" r=".9" fill="currentColor"/><circle cx="8" cy="8" r=".9" fill="currentColor"/><circle cx="12.5" cy="8" r=".9" fill="currentColor"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 16 16"><path d="M8 3.5v9M3.5 8h9"/></symbol>
+    <symbol id="i-x" viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></symbol>
+    <symbol id="i-min" viewBox="0 0 16 16"><path d="M4 8h8"/></symbol>
+    <symbol id="i-max" viewBox="0 0 16 16"><rect x="4" y="4" width="8" height="8" rx="1"/></symbol>
+    <symbol id="i-down" viewBox="0 0 16 16"><path d="M4.5 6.5 8 10l3.5-3.5"/></symbol>
+    <symbol id="i-right" viewBox="0 0 16 16"><path d="M6.5 4.5 10 8l-3.5 3.5"/></symbol>
+    <symbol id="i-search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4"/><path d="M10 10l3.2 3.2"/></symbol>
+    <symbol id="i-net" viewBox="0 0 16 16"><circle cx="8" cy="3.5" r="1.6"/><circle cx="3.5" cy="12" r="1.6"/><circle cx="12.5" cy="12" r="1.6"/><path d="M7.2 5 4.3 10.5M8.8 5l2.9 5.5M5.2 12h5.6"/></symbol>
+    <symbol id="i-prompt" viewBox="0 0 16 16"><path d="M3 5l3 3-3 3M8.5 11.5H13"/></symbol>
+    <symbol id="i-info" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M8 7.2v4M8 4.8v.2"/></symbol>
+  </defs>
+</svg>
+
+<h1>cosmic-rex mockups</h1>
+<p class="note">Static pictures for <code>ux-spec.md</code>. Boxes, sessions, programs and terminal text are invented. Colours stand in for the COSMIC default themes; the real app takes accent, density and corner radius from the desktop.</p>
+
+<div class="win dark legend" style="height:auto" role="img" aria-label="Status shapes legend">
+  <span class="r c-warn"><svg class="sh f"><use href="#s-blocked"/></svg><span style="color:var(--text)">Needs you</span></span>
+  <span class="r c-danger"><svg class="sh"><use href="#s-error"/></svg><span style="color:var(--text)">Error</span></span>
+  <span class="r c-ok"><svg class="sh"><use href="#s-done"/></svg><span style="color:var(--text)">Done, unseen</span></span>
+  <span class="r c-mid"><svg class="sh"><use href="#s-working"/></svg><span style="color:var(--text)">Working</span></span>
+  <span class="r c-low"><svg class="sh"><use href="#s-idle"/></svg><span style="color:var(--text)">Idle</span></span>
+  <span class="r c-mid"><svg class="sh"><use href="#s-paused"/></svg><span style="color:var(--text)">Link lost</span></span>
+  <span class="r c-low"><svg class="sh"><use href="#s-off"/></svg><span style="color:var(--text)">Disconnected</span></span>
+  <span class="r"><span class="mono t0">ST</span><span>Box monogram</span></span>
+  <span class="r"><span class="chip"><svg class="ic" style="width:12px;height:12px"><use href="#i-theirs"/></svg>Sized by MacBook</span></span>
+  <span class="r"><span class="chip"><svg class="ic" style="width:12px;height:12px"><use href="#i-fit"/></svg>Fits here</span></span>
+</div>
+
+<!-- ============================================================ 1 -->
+<h2>1. Main window, wide, dark, inbox open</h2>
+<p class="note">Keyboard is in the top pane on <b>studio</b>. That pane is drawn at the MacBook's grid, so it is letterboxed. Two agents need the operator, on two boxes.</p>
+<div class="stage">
+<div class="win dark w-wide">
+  <div class="hb">
+    <span class="ib"><svg class="ic"><use href="#i-menu"/></svg></span>
+    <div class="mid"><span class="crumb"><span class="mono t0">ST</span><b>studio</b><span class="sep">›</span>api-refactor<span class="sep">›</span>tests<svg class="ic c-low"><use href="#i-down"/></svg></span></div>
+    <span class="attn"><svg class="sh f c-warn"><use href="#s-blocked"/></svg>2 need you</span>
+    <span class="ib"><svg class="ic"><use href="#i-dots"/></svg></span>
+    <span class="ib"><svg class="ic"><use href="#i-min"/></svg></span><span class="ib"><svg class="ic"><use href="#i-max"/></svg></span><span class="ib"><svg class="ic"><use href="#i-x"/></svg></span>
+  </div>
+  <div class="body h-wide">
+    <div class="side">
+      <div class="box"><span class="mono t0">ST</span>studio</div>
+      <div class="sess sel"><svg class="sh f c-warn"><use href="#s-blocked"/></svg>api-refactor</div>
+      <div class="sess"><svg class="sh c-mid"><use href="#s-working"/></svg>billing-migration</div>
+      <div class="sess"><svg class="sh c-low"><use href="#s-idle"/></svg>docs-site</div>
+      <div class="gap"></div>
+      <div class="box"><span class="mono t1">FG</span>forge</div>
+      <div class="sess"><svg class="sh f c-warn"><use href="#s-blocked"/></svg>infra<span class="n">2</span></div>
+      <div class="sess"><svg class="sh c-ok"><use href="#s-done"/></svg>nightly-evals</div>
+      <div class="gap"></div>
+      <div class="box"><span class="mono t2">LP</span>laptop</div>
+      <div class="sess"><svg class="sh c-low"><use href="#s-idle"/></svg>scratch</div>
+      <div class="gap"></div>
+      <div class="box"><span class="mono t3">AT</span>attic<span class="st"><svg class="sh c-low"><use href="#s-off"/></svg>Disconnected</span></div>
+      <div class="foot"><svg class="ic"><use href="#i-plus"/></svg>Add box</div>
+    </div>
+    <div class="main">
+      <div class="tabs">
+        <span class="tab on">tests</span>
+        <span class="tab"><svg class="sh c-mid"><use href="#s-working"/></svg>server</span>
+        <span class="tab">shell</span>
+        <span class="ib"><svg class="ic"><use href="#i-plus"/></svg></span>
+      </div>
+      <div class="grid">
+        <div class="pane focus span t0">
+          <div class="ph"><span class="mono t0">ST</span><span class="ttl">claude-code</span><span class="d" style="color:var(--text3)">~/src/api-refactor</span><span class="sp"></span><span class="chip"><svg class="ic" style="width:12px;height:12px"><use href="#i-theirs"/></svg>Sized by MacBook · 142×38</span><svg class="sh f c-warn"><use href="#s-blocked"/></svg></div>
+          <div class="lb"><pre class="term"><span class="g">●</span> Update(crates/api/src/routes/invoice.rs)
+  <span class="d">⎿  Updated with 14 additions and 3 removals</span>
+<span class="g">●</span> Unknown ids now return 404. I will run the tests.
+
+<span class="b">╭────────────────────────────────────────────────────────╮</span>
+<span class="b">│</span> Run command                                            <span class="b">│</span>
+<span class="b">│</span>   cargo test --workspace                               <span class="b">│</span>
+<span class="b">│</span> Do you want to proceed?                                <span class="b">│</span>
+<span class="b">│</span> <span class="y">❯ 1. Yes</span>                                               <span class="b">│</span>
+<span class="b">│</span>   2. Yes, and do not ask again for cargo test          <span class="b">│</span>
+<span class="b">│</span>   3. No, and say what to do instead                    <span class="b">│</span>
+<span class="b">╰────────────────────────────────────────────────────────╯</span></pre></div>
+        </div>
+        <div class="pane t0">
+          <div class="ph"><span class="mono t0">ST</span><span class="ttl">zsh</span><span class="sp"></span><span class="chip"><svg class="ic" style="width:12px;height:12px"><use href="#i-fit"/></svg>Fits here</span></div>
+          <pre class="term"><span class="b">~/src/api-refactor</span> <span class="d">main ⇡2</span>
+<span class="g">❯</span> git status --short
+ M crates/api/src/routes/invoice.rs
+ M crates/api/tests/invoice.rs
+<span class="g">❯</span> </pre>
+        </div>
+        <div class="pane t0">
+          <div class="ph"><span class="mono t0">ST</span><span class="ttl">tail</span><span class="sp"></span><span class="chip"><svg class="ic" style="width:12px;height:12px"><use href="#i-fit"/></svg>Fits here</span></div>
+          <pre class="term"><span class="d">14:02:07</span> GET /invoices/41 200 3ms
+<span class="d">14:02:09</span> GET /invoices/9000 404 1ms
+<span class="d">14:02:15</span> POST /invoices 201 12ms
+<span class="d">14:02:31</span> GET /healthz 200 0ms</pre>
+        </div>
+      </div>
+    </div>
+    <div class="drawer">
+      <div class="hd">Inbox<span class="ib"><svg class="ic"><use href="#i-x"/></svg></span></div>
+      <div class="sec">Needs you</div>
+      <div class="card sel">
+        <div class="r"><svg class="sh f c-warn"><use href="#s-blocked"/></svg><span class="w">Approval</span><span class="age">4 min</span></div>
+        <div class="r where"><span class="mono t0">ST</span>api-refactor › tests</div>
+        <div class="q">Run cargo test --workspace?</div>
+        <div class="cap">reports itself as claude-code</div>
+      </div>
+      <div class="card">
+        <div class="r"><svg class="sh f c-warn"><use href="#s-blocked"/></svg><span class="w">Question</span><span class="age">1 min</span></div>
+        <div class="r where"><span class="mono t1">FG</span>infra › plan</div>
+        <div class="q">Two modules define the same bucket. Which one should own it?</div>
+        <div class="cap">reports itself as codex</div>
+      </div>
+      <div class="sec">Failed</div>
+      <div class="card">
+        <div class="r"><svg class="sh c-danger"><use href="#s-error"/></svg><span class="w">Error</span><span class="age">12 min</span></div>
+        <div class="r where"><span class="mono t1">FG</span>infra › apply</div>
+        <div class="q">Provider returned 403 for staging.</div>
+      </div>
+      <div class="sec">Finished</div>
+      <div class="card">
+        <div class="r"><svg class="sh c-ok"><use href="#s-done"/></svg><span class="w">Done</span><span class="age">26 min</span></div>
+        <div class="r where"><span class="mono t1">FG</span>nightly-evals › run</div>
+      </div>
+      <div class="more"><svg class="sh c-mid"><use href="#s-working"/></svg>Working (3)<span class="sp"></span><svg class="ic"><use href="#i-right"/></svg></div>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- ============================================================ 2 -->
+<h2>2. Main window, wide, light, inbox closed</h2>
+<p class="note">Same window after switching to <b>forge</b>. The monogram, its tint rule on every pane header and the breadcrumb all changed together. Terminal colours belong to the server and are not tinted.</p>
+<div class="stage">
+<div class="win light w-wide">
+  <div class="hb">
+    <span class="ib"><svg class="ic"><use href="#i-menu"/></svg></span>
+    <div class="mid"><span class="crumb"><span class="mono t1">FG</span><b>forge</b><span class="sep">›</span>infra<span class="sep">›</span>plan<svg class="ic c-low"><use href="#i-down"/></svg></span></div>
+    <span class="attn"><svg class="sh f c-warn"><use href="#s-blocked"/></svg>2 need you</span>
+    <span class="ib"><svg class="ic"><use href="#i-dots"/></svg></span>
+    <span class="ib"><svg class="ic"><use href="#i-min"/></svg></span><span class="ib"><svg class="ic"><use href="#i-max"/></svg></span><span class="ib"><svg class="ic"><use href="#i-x"/></svg></span>
+  </div>
+  <div class="body h-wide">
+    <div class="side">
+      <div class="box"><span class="mono t0">ST</span>studio</div>
+      <div class="sess"><svg class="sh f c-warn"><use href="#s-blocked"/></svg>api-refactor</div>
+      <div class="sess"><svg class="sh c-mid"><use href="#s-working"/></svg>billing-migration</div>
+      <div class="sess"><svg class="sh c-low"><use href="#s-idle"/></svg>docs-site</div>
+      <div class="gap"></div>
+      <div class="box"><span class="mono t1">FG</span>forge<span class="st">slow 240 ms</span></div>
+      <div class="sess sel"><svg class="sh f c-warn"><use href="#s-blocked"/></svg>infra<span class="n">2</span></div>
+      <div class="sess"><svg class="sh c-ok"><use href="#s-done"/></svg>nightly-evals</div>
+      <div class="gap"></div>
+      <div class="box"><span class="mono t2">LP</span>laptop</div>
+      <div class="sess"><svg class="sh c-low"><use href="#s-idle"/></svg>scratch</div>
+      <div class="gap"></div>
+      <div class="box"><span class="mono t3">AT</span>attic<span class="st"><svg class="sh c-low"><use href="#s-off"/></svg>Disconnected</span></div>
+      <div class="foot"><svg class="ic"><use href="#i-plus"/></svg>Add box</div>
+    </div>
+    <div class="main">
+      <div class="tabs">
+        <span class="tab on">plan</span>
+        <span class="tab"><svg class="sh c-danger"><use href="#s-error"/></svg>apply</span>
+        <span class="tab">shell</span>
+        <span class="ib"><svg class="ic"><use href="#i-plus"/></svg></span>
+      </div>
+      <div class="grid" style="grid-template-rows:1fr">
+        <div class="pane focus t1">
+          <div class="ph"><span class="mono t1">FG</span><span class="ttl">codex</span><span style="color:var(--text3)">~/infra</span><span class="sp"></span><span class="chip"><svg class="ic" style="width:12px;height:12px"><use href="#i-fit"/></svg>Fits here</span><svg class="sh f c-warn"><use href="#s-blocked"/></svg></div>
+          <pre class="term"><span class="d">Reading modules/storage and modules/cdn…</span>
+
+Both modules declare the bucket "assets-staging".
+
+  modules/storage/main.tf:12
+  modules/cdn/main.tf:40
+
+<span class="y">Which module should own it?</span>
+  a) storage   keep it with the other buckets
+  b) cdn       keep it with its only consumer
+
+<span class="g">&gt;</span> <span class="cur"> </span></pre>
+        </div>
+        <div class="pane t1">
+          <div class="ph"><span class="mono t1">FG</span><span class="ttl">zsh</span><span class="sp"></span><span class="chip"><svg class="ic" style="width:12px;height:12px"><use href="#i-theirs"/></svg>Unclaimed · 120×40</span></div>
+          <div class="lb"><pre class="term"><span class="b">~/infra</span> <span class="d">staging</span>
+<span class="g">❯</span> terraform fmt -check
+modules/cdn/main.tf
+<span class="g">❯</span> </pre></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- ============================================================ 3 -->
+<h2>3. Narrow layout (tiled to a third)</h2>
+<p class="note">Under 648 px the sidebar becomes an overlay, tabs become a menu and one pane shows at a time. Identity and the count stay. The one-pane view is local; it does not zoom the pane for other devices.</p>
+<div class="stage pair">
+<div class="win dark w-narrow">
+  <div class="hb">
+    <span class="ib"><svg class="ic"><use href="#i-menu"/></svg></span>
+    <span class="crumb"><span class="mono t0">ST</span><b>api-refactor</b><svg class="ic c-low"><use href="#i-down"/></svg></span>
+    <span style="flex:1"></span>
+    <span class="attn" style="padding:0 10px"><svg class="sh f c-warn"><use href="#s-blocked"/></svg>2</span>
+    <span class="ib"><svg class="ic"><use href="#i-x"/></svg></span>
+  </div>
+  <div class="body h-narrow" style="flex-direction:column">
+    <div class="tabs"><span class="tab on">tests<svg class="ic c-low"><use href="#i-down"/></svg></span><span style="flex:1"></span><span class="cap" style="color:var(--text2)">pane 1 of 3</span><span class="ib"><svg class="ic" style="transform:scaleX(-1)"><use href="#i-right"/></svg></span><span class="ib"><svg class="ic"><use href="#i-right"/></svg></span></div>
+    <div class="pane focus t0" style="flex:1">
+      <div class="ph"><span class="mono t0">ST</span><span class="ttl">claude-code</span><span class="sp"></span><span class="chip"><svg class="ic" style="width:12px;height:12px"><use href="#i-theirs"/></svg>MacBook · 142×38</span></div>
+      <div class="lb"><pre class="term" style="width:100%;font-size:9px;line-height:12px"><span class="g">●</span> Update(crates/api/src/routes/invoice.rs)
+  <span class="d">⎿  Updated with 14 additions and 3 removals</span>
+<span class="g">●</span> Unknown ids now return 404. I will run the tests.
+
+<span class="b">╭────────────────────────────────────────────────────────╮</span>
+<span class="b">│</span> Run command                                            <span class="b">│</span>
+<span class="b">│</span>   cargo test --workspace                               <span class="b">│</span>
+<span class="b">│</span> Do you want to proceed?                                <span class="b">│</span>
+<span class="b">│</span> <span class="y">❯ 1. Yes</span>                                               <span class="b">│</span>
+<span class="b">│</span>   2. Yes, and do not ask again for cargo test          <span class="b">│</span>
+<span class="b">│</span>   3. No, and say what to do instead                    <span class="b">│</span>
+<span class="b">╰────────────────────────────────────────────────────────╯</span></pre></div>
+    </div>
+    <div class="strip"><svg class="sh f c-warn"><use href="#s-blocked"/></svg><b>Approval</b><span class="mono t0">ST</span><span class="where">api-refactor › tests</span><span class="sp"></span><svg class="ic c-low"><use href="#i-right"/></svg></div>
+  </div>
+</div>
+
+<div class="win light w-narrow">
+  <div class="hb">
+    <span class="ib"><svg class="ic"><use href="#i-menu"/></svg></span>
+    <span class="crumb"><span class="mono t1">FG</span><b>infra</b><svg class="ic c-low"><use href="#i-down"/></svg></span>
+    <span style="flex:1"></span>
+    <span class="attn" style="padding:0 10px"><svg class="sh f c-warn"><use href="#s-blocked"/></svg>2</span>
+    <span class="ib"><svg class="ic"><use href="#i-x"/></svg></span>
+  </div>
+  <div class="body h-narrow" style="position:relative">
+    <div class="side" style="width:100%">
+      <div class="box"><span class="mono t0">ST</span>studio</div>
+      <div class="sess"><svg class="sh f c-warn"><use href="#s-blocked"/></svg>api-refactor</div>
+      <div class="sess"><svg class="sh c-mid"><use href="#s-working"/></svg>billing-migration</div>
+      <div class="sess"><svg class="sh c-low"><use href="#s-idle"/></svg>docs-site</div>
+      <div class="gap"></div>
+      <div class="box"><span class="mono t1">FG</span>forge</div>
+      <div class="sess sel"><svg class="sh f c-warn"><use href="#s-blocked"/></svg>infra<span class="n">2</span></div>
+      <div class="sess"><svg class="sh c-ok"><use href="#s-done"/></svg>nightly-evals</div>
+      <div class="gap"></div>
+      <div class="box"><span class="mono t2">LP</span>laptop</div>
+      <div class="sess"><svg class="sh c-low"><use href="#s-idle"/></svg>scratch</div>
+      <div class="gap"></div>
+      <div class="box"><span class="mono t3">AT</span>attic<span class="st"><svg class="sh c-low"><use href="#s-off"/></svg>Disconnected</span></div>
+      <div class="foot"><svg class="ic"><use href="#i-plus"/></svg>Add box</div>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- ============================================================ 4 -->
+<h2>4. Quick switcher</h2>
+<p class="note">Ctrl+Shift+K. Every row starts with a status shape and the box monogram, so the destination machine is read before Enter. Typed keys stay in the switcher.</p>
+<div class="stage">
+<div class="win dark w-med" style="height:520px">
+  <div class="hb">
+    <span class="ib"><svg class="ic"><use href="#i-menu"/></svg></span>
+    <div class="mid"><span class="crumb"><span class="mono t0">ST</span><b>studio</b><span class="sep">›</span>api-refactor<span class="sep">›</span>tests</span></div>
+    <span class="attn"><svg class="sh f c-warn"><use href="#s-blocked"/></svg>2</span>
+    <span class="ib"><svg class="ic"><use href="#i-x"/></svg></span>
+  </div>
+  <div class="body" style="height:464px">
+    <div class="main"><div class="pane t0" style="flex:1"><div class="ph"><span class="mono t0">ST</span><span class="ttl">claude-code</span></div><pre class="term"> </pre></div></div>
+  </div>
+  <div class="scrim"></div>
+  <div class="dlg" style="top:56px;width:560px;padding:12px;gap:4px">
+    <div class="field act" style="height:40px;flex:none"><svg class="ic c-low"><use href="#i-search"/></svg>inf<span style="width:1px;height:18px;background:var(--accent);margin-left:-6px"></span></div>
+    <div class="sec">Needs you</div>
+    <div class="res sel"><svg class="sh f c-warn"><use href="#s-blocked"/></svg><span class="mono t1">FG</span><span><b>inf</b>ra › plan</span><span class="hint">Question · 1 min · Enter</span></div>
+    <div class="sec">Sessions and tabs</div>
+    <div class="res"><svg class="sh f c-warn"><use href="#s-blocked"/></svg><span class="mono t1">FG</span><span><b>inf</b>ra</span><span class="hint">3 tabs</span></div>
+    <div class="res"><svg class="sh c-danger"><use href="#s-error"/></svg><span class="mono t1">FG</span><span><b>inf</b>ra › apply</span><span class="hint">Error · 12 min</span></div>
+    <div class="res"><svg class="sh c-low"><use href="#s-idle"/></svg><span class="mono t1">FG</span><span><b>inf</b>ra › shell</span></div>
+    <div class="res" style="color:var(--text3)"><svg class="sh c-low"><use href="#s-off"/></svg><span class="mono t3" style="opacity:.6">AT</span><span><b>inf</b>luxdb-backups</span><span class="hint" style="color:var(--text3)">attic is disconnected</span></div>
+    <div class="sec">Commands</div>
+    <div class="res"><svg class="sh" style="visibility:hidden"><use href="#s-idle"/></svg>Copy debug <b>inf</b>o<span class="hint">command</span></div>
+  </div>
+</div>
+</div>
+
+<!-- ============================================================ 5 -->
+<h2>5. Agent inbox with the answer sheet</h2>
+<p class="note">Opened from the selected inbox row. The app's words say where the request comes from; the program's words sit inside a labelled frame. Buttons are named for the key they send, because the client cannot know what "1" means. The default action is the safe one.</p>
+<div class="stage">
+<div class="win light w-wide" style="height:660px">
+  <div class="hb">
+    <span class="ib"><svg class="ic"><use href="#i-menu"/></svg></span>
+    <div class="mid"><span class="crumb"><span class="mono t1">FG</span><b>forge</b><span class="sep">›</span>infra<span class="sep">›</span>plan</span></div>
+    <span class="attn"><svg class="sh f c-warn"><use href="#s-blocked"/></svg>2 need you</span>
+    <span class="ib"><svg class="ic"><use href="#i-dots"/></svg></span><span class="ib"><svg class="ic"><use href="#i-x"/></svg></span>
+  </div>
+  <div class="body" style="height:604px">
+    <div class="main"><div class="pane t1" style="flex:1"><div class="ph"><span class="mono t1">FG</span><span class="ttl">codex</span></div><pre class="term"><span class="d">Reading modules/storage and modules/cdn…</span></pre></div></div>
+    <div class="drawer">
+      <div class="hd">Inbox</div>
+      <div class="sec">Needs you</div>
+      <div class="card sel">
+        <div class="r"><svg class="sh f c-warn"><use href="#s-blocked"/></svg><span class="w">Approval</span><span class="age">4 min</span></div>
+        <div class="r where"><span class="mono t0">ST</span>api-refactor › tests</div>
+        <div class="q">Run cargo test --workspace?</div>
+      </div>
+      <div class="card">
+        <div class="r"><svg class="sh f c-warn"><use href="#s-blocked"/></svg><span class="w">Question</span><span class="age">1 min</span></div>
+        <div class="r where"><span class="mono t1">FG</span>infra › plan</div>
+        <div class="q">Two modules define the same bucket. Which one should own it?</div>
+      </div>
+    </div>
+  </div>
+  <div class="scrim"></div>
+  <div class="dlg" style="top:40px;left:36%;width:600px" role="img" aria-label="Answer sheet">
+    <h3>Approval request</h3>
+    <div class="r"><span class="mono t0">ST</span><b>studio</b><span class="where">› api-refactor › tests</span><span class="age">waiting 4 min</span></div>
+    <div class="cap" style="margin-top:-8px">The program reports itself as "claude-code".</div>
+    <div class="frame"><div class="lab">The program says</div><div class="q">Run cargo test --workspace?</div></div>
+    <div class="frame"><div class="lab">Screen, last 7 lines · read 2 s ago</div><pre class="term" style="font-size:11px;line-height:15px"><span class="b">│</span> Run command
+<span class="b">│</span>   cargo test --workspace
+<span class="b">│</span> Do you want to proceed?
+<span class="b">│</span> <span class="y">❯ 1. Yes</span>
+<span class="b">│</span>   2. Yes, and do not ask again for cargo test
+<span class="b">│</span>   3. No, and say what to do instead
+<span class="b">╰──────────────────────────────────────────────────────────────</span></pre></div>
+    <div class="row"><span class="lbl">Send key</span><span class="key">1</span><span class="key">2</span><span class="key">3</span><span class="key">y</span><span class="key">n</span><span class="key">Enter</span><span class="key">Esc</span></div>
+    <div class="row"><span class="lbl">Reply</span><span class="field">Type a reply, then Enter</span><span class="btn off">Send</span></div>
+    <div class="cap">Goes to studio. Sent once, never repeated. If the request changes before you answer, nothing is sent.</div>
+    <div class="btns"><span class="btn">Cancel</span><span class="btn sug">Open terminal</span></div>
+  </div>
+</div>
+</div>
+
+<p class="note" style="margin-top:8px">The same sheet after the request changed while it was open: controls are off and the new state is shown.</p>
+<div class="stage">
+<div class="win light" style="width:600px;border-radius:16px;padding:24px;display:flex;flex-direction:column;gap:12px;background:var(--surface)">
+  <div style="font-weight:700;font-size:20px;line-height:30px">Approval request</div>
+  <div class="r"><span class="mono t0">ST</span><b>studio</b><span class="where">› api-refactor › tests</span></div>
+  <div class="warnline"><svg class="ic c-warn" style="margin-top:2px"><use href="#i-info"/></svg><div><b>This changed while you were reading.</b><br><span class="where">The program is now working. Nothing was sent.</span></div></div>
+  <div class="row"><span class="lbl">Send key</span><span class="key" style="opacity:.4">1</span><span class="key" style="opacity:.4">2</span><span class="key" style="opacity:.4">3</span><span class="key" style="opacity:.4">y</span><span class="key" style="opacity:.4">n</span><span class="key" style="opacity:.4">Enter</span><span class="key" style="opacity:.4">Esc</span></div>
+  <div class="btns"><span class="btn">Close</span><span class="btn sug">Open terminal</span></div>
+</div>
+</div>
+
+<!-- ============================================================ 6 -->
+<h2>6. Add a box</h2>
+<p class="note">Three steps. Listing is local; a machine is contacted only after it is chosen, and the check reads status only. The sentence about control is shown before the box is added.</p>
+<div class="stage pair">
+<div class="win dark" style="width:440px;border-radius:16px;padding:24px;display:flex;flex-direction:column;gap:12px;background:var(--surface)">
+  <div style="font-weight:700;font-size:20px;line-height:30px">Add a box</div>
+  <div class="cap" style="margin-top:-8px;color:var(--text2)">Step 1 of 3 · Where is it?</div>
+  <div class="opt"><span class="mono t5">MB</span><div class="tx"><b>mac-mini</b><small>From your other devices · saved on MacBook</small></div><svg class="ic end"><use href="#i-right"/></svg></div>
+  <div class="opt"><svg class="ic"><use href="#i-max"/></svg><div class="tx"><b>This computer</b><small>No server is running here. cosmic-rex never starts one.</small></div></div>
+  <div class="opt sel"><svg class="ic"><use href="#i-net"/></svg><div class="tx"><b>Tailscale</b><small>4 machines on your tailnet</small></div><svg class="ic end"><use href="#i-right"/></svg></div>
+  <div class="opt"><svg class="ic"><use href="#i-prompt"/></svg><div class="tx"><b>SSH or address</b><small>user@host, or an https:// address</small></div><svg class="ic end"><use href="#i-right"/></svg></div>
+  <div class="btns"><span class="btn">Cancel</span></div>
+</div>
+
+<div class="win dark" style="width:440px;border-radius:16px;padding:24px;display:flex;flex-direction:column;gap:12px;background:var(--surface)">
+  <div style="font-weight:700;font-size:20px;line-height:30px">Add a box</div>
+  <div class="cap" style="margin-top:-8px;color:var(--text2)">Step 2 of 3 · Check</div>
+  <div class="r"><svg class="sh c-ok"><use href="#s-done"/></svg><b>A Rex server answered</b></div>
+  <dl class="facts">
+    <dt>Address</dt><dd>https://forge.example-tailnet.ts.net</dd>
+    <dt>Signed in as</dt><dd>dev</dd>
+    <dt>Server</dt><dd>API 21 · supported</dd>
+    <dt>Sessions</dt><dd>2</dd>
+  </dl>
+  <div class="cap">Only status was read. Nothing was attached, created or resized.</div>
+  <div class="warnline"><svg class="ic c-warn" style="margin-top:2px"><use href="#i-info"/></svg><div>Connecting gives this app everything your account can do on this box.</div></div>
+  <div class="btns"><span class="btn">Back</span><span class="btn sug">Continue</span></div>
+</div>
+
+<div class="win dark" style="width:440px;border-radius:16px;padding:24px;display:flex;flex-direction:column;gap:12px;background:var(--surface)">
+  <div style="font-weight:700;font-size:20px;line-height:30px">Add a box</div>
+  <div class="cap" style="margin-top:-8px;color:var(--text2)">Step 3 of 3 · Name it</div>
+  <div class="row"><span class="lbl">Name</span><span class="field act" style="color:var(--text)">forge</span></div>
+  <div class="row"><span class="lbl">Monogram</span><span class="field" style="flex:none;width:64px;color:var(--text)">FG</span><span class="mono t1">FG</span></div>
+  <div class="row" style="margin-top:-8px"><span class="lbl"></span><span class="cap">Shown wherever you can type into this box.</span></div>
+  <div class="row"><span class="lbl">Tint</span><span class="sw"><i class="t0"></i><i class="t1 on"></i><i class="t2"></i><i class="t3"></i><i class="t4"></i><i class="t5"></i></span></div>
+  <div class="row"><span class="lbl"></span><span class="where">Connect when the app starts: on</span></div>
+  <div class="btns"><span class="btn">Back</span><span class="btn sug">Add box</span></div>
+</div>
+</div>
+
+<!-- ============================================================ 7 -->
+<h2>7. A box that dropped</h2>
+<p class="note">The last screen stays for reading, under a hatch pattern and a plate; the cursor is gone and keys are not sent or queued. The sidebar keeps the box's last sessions with their age. Other boxes carry on.</p>
+<div class="stage">
+<div class="win dark w-wide">
+  <div class="hb">
+    <span class="ib"><svg class="ic"><use href="#i-menu"/></svg></span>
+    <div class="mid"><span class="crumb"><span class="mono t0">ST</span><b>studio</b><span class="sep">›</span>api-refactor<span class="sep">›</span>tests<span class="chip" style="margin-left:4px"><svg class="sh c-mid"><use href="#s-paused"/></svg>Paused</span></span></div>
+    <span class="attn"><svg class="sh f c-warn"><use href="#s-blocked"/></svg>1 needs you</span>
+    <span class="ib"><svg class="ic"><use href="#i-dots"/></svg></span>
+    <span class="ib"><svg class="ic"><use href="#i-min"/></svg></span><span class="ib"><svg class="ic"><use href="#i-max"/></svg></span><span class="ib"><svg class="ic"><use href="#i-x"/></svg></span>
+  </div>
+  <div class="body" style="height:520px">
+    <div class="side">
+      <div class="box"><span class="mono t0">ST</span>studio<span class="st"><svg class="sh c-mid"><use href="#s-paused"/></svg>Retrying in 8 s</span></div>
+      <div class="asof">as of 14:02</div>
+      <div class="sess sel old"><svg class="sh f c-low"><use href="#s-blocked"/></svg>api-refactor</div>
+      <div class="sess old"><svg class="sh c-low"><use href="#s-working"/></svg>billing-migration</div>
+      <div class="sess old"><svg class="sh c-low"><use href="#s-idle"/></svg>docs-site</div>
+      <div class="gap"></div>
+      <div class="box"><span class="mono t1">FG</span>forge</div>
+      <div class="sess"><svg class="sh f c-warn"><use href="#s-blocked"/></svg>infra</div>
+      <div class="sess"><svg class="sh c-ok"><use href="#s-done"/></svg>nightly-evals</div>
+      <div class="gap"></div>
+      <div class="box"><span class="mono t2">LP</span>laptop</div>
+      <div class="sess"><svg class="sh c-low"><use href="#s-idle"/></svg>scratch</div>
+      <div class="foot"><svg class="ic"><use href="#i-plus"/></svg>Add box</div>
+    </div>
+    <div class="main">
+      <div class="banner"><svg class="sh c-mid"><use href="#s-paused"/></svg><div><b>studio is not answering.</b> <span class="where">Last contact 14:02:10. Retrying in 8 s.</span></div><span class="sp"></span><span class="btn">Retry now</span></div>
+      <div class="tabs"><span class="tab on">tests</span><span class="tab">server</span><span class="tab">shell</span></div>
+      <div class="grid" style="grid-template-rows:1fr">
+        <div class="pane paused t0" style="outline:2px dashed var(--line2)">
+          <div class="ph"><span class="mono t0">ST</span><span class="ttl">claude-code</span><span class="sp"></span><span class="chip"><svg class="sh c-mid"><use href="#s-paused"/></svg>Paused</span></div>
+          <pre class="term"><span class="g">●</span> Update(crates/api/src/routes/invoice.rs)
+  <span class="d">⎿  Updated with 14 additions and 3 removals</span>
+<span class="g">●</span> The handler now returns 404 for unknown ids.
+
+<span class="b">│</span> Run command
+<span class="b">│</span>   cargo test --workspace
+<span class="b">│</span> Do you want to proceed?
+<span class="b">│</span> <span class="y">❯ 1. Yes</span>
+<span class="b">│</span>   2. Yes, and do not ask again
+<span class="b">│</span>   3. No, and say what to do instead</pre>
+          <div class="hatch"></div>
+          <div class="plate"><b>Paused · last screen from 14:02:10</b><small>Typing is off. Nothing is queued.</small></div>
+        </div>
+        <div class="pane paused t0">
+          <div class="ph"><span class="mono t0">ST</span><span class="ttl">zsh</span><span class="sp"></span><span class="chip"><svg class="sh c-mid"><use href="#s-paused"/></svg>Paused</span></div>
+          <pre class="term"><span class="b">~/src/api-refactor</span> <span class="d">main ⇡2</span>
+<span class="g">❯</span> git status --short
+ M crates/api/src/routes/invoice.rs
+ M crates/api/tests/invoice.rs
+<span class="g">❯</span> </pre>
+          <div class="hatch"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+</body>
+</html>

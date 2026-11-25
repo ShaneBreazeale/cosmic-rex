@@ -1,0 +1,21 @@
+[package]
+name = "cosmic-rex"
+description = "Unofficial Rex client for COSMIC"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# No rex-rune, rexrs or ghostty-vt here: everything goes through rex-backend.
+[dependencies]
+rex-backend.workspace = true
+clap = { version = "4", features = ["derive"] }
+env_logger = "0.11"
+flume = "0.11"
+futures-util = "0.3"
+
+[dependencies.libcosmic]
+git = "https://github.com/pop-os/libcosmic.git"
+rev = "009fb9d4138f25615122c4ccc42d025472da9cdd"
+default-features = false
+features = ["winit", "tokio", "wayland", "wgpu", "multi-window", "xdg-portal"]
