@@ -1,5 +1,6 @@
 //! What a frontend draws: plain data derived from the core's model.
 use crate::Frame;
+use std::time::Instant;
 use rex_rune::{
     connection::{
         DEFAULT_TAB_LABEL, HostModel,
@@ -39,6 +40,21 @@ pub struct Agent {
     pub message: Option<String>,
     /// Session and tab, so a program cannot pose as one in another terminal.
     pub place: String,
+    /// When it entered this state, as far as this client can tell.
+    pub since: Option<Instant>,
+    /// Percent, if it says.
+    pub progress: Option<u8>,
+}
+
+impl Agent {
+    /// Most urgent state first, then the longest wait; an unknown wait goes last.
+    pub fn by_urgency(a: &Self, b: &Self) -> std::cmp::Ordering {
+        let wait = |a: &Self| (a.since.is_none(), a.since);
+        b.state
+            .cmp(&a.state)
+            .then_with(|| wait(a).cmp(&wait(b)))
+            .then_with(|| a.place.cmp(&b.place))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -46,6 +62,8 @@ pub struct Session {
     pub id: String,
     pub label: String,
     pub state: AgentState,
+    /// What its focused pane is running, when no program has reported a status. Plain text.
+    pub about: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -118,6 +136,7 @@ impl Snapshot {
                     .map(|a| a.state)
                     .max()
                     .unwrap_or_default(),
+                about: about(m, &s.session_id),
             })
             .collect();
         let window = m.window();
@@ -173,6 +192,16 @@ impl Snapshot {
             agents,
         }
     }
+}
+
+fn about(m: &HostModel, session: &str) -> String {
+    let Some(view) = m.views.get(session) else { return String::new() };
+    let window = view
+        .windows
+        .iter()
+        .find(|w| w.window_id == view.active_window_id)
+        .or(view.windows.first());
+    window.and_then(|w| w.focused_block_id.as_deref()).map_or_else(String::new, |b| pane_title(m, b))
 }
 
 fn pane_title(m: &HostModel, block: &str) -> String {
@@ -242,7 +271,7 @@ fn agents(m: &HostModel) -> Vec<Agent> {
             }
         }
     }
-    all.sort_by(|a, b| b.state.cmp(&a.state).then_with(|| a.place.cmp(&b.place)));
+    all.sort_by(Agent::by_urgency);
     all
 }
 
@@ -267,6 +296,8 @@ fn agent(
         app: plain(r.app.as_deref().unwrap_or("program"), 32),
         message: r.msg.as_deref().or(r.title.as_deref()).map(|t| plain(t, 200)),
         place: format!("{} / {tab}", plain(session_label, 40)),
+        since: r.age.and_then(|a| a.observed.checked_sub(a.initial)),
+        progress: r.progress,
     }
 }
 
@@ -381,6 +412,24 @@ mod tests {
             assert_eq!(Snapshot::new(&m).panes[1].size, want);
         }
         assert!(Snapshot::new(&m).panes.iter().all(|p| !p.live));
+    }
+
+    #[test]
+    fn the_longest_wait_comes_first_and_progress_survives() {
+        let mut m = model();
+        m.activity.clear();
+        for (block, ago) in [("block:1", 10), ("block:2", 90)] {
+            let mut r = StatusRecord::parse(&json!({"state": "blocked", "progress": 40}));
+            r.age = Some(rex_rune::connection::activity::time::Age {
+                observed: Instant::now(),
+                initial: std::time::Duration::from_secs(ago),
+                reported: false,
+            });
+            m.activity.entry(block.into()).or_default().insert(String::new(), r);
+        }
+        let s = Snapshot::new(&m);
+        assert_eq!(s.agents[0].block, "block:2");
+        assert_eq!(s.agents[0].progress, Some(40));
     }
 
     #[test]

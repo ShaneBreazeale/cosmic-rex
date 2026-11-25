@@ -130,7 +130,12 @@ pub fn sample() -> (Vec<crate::BoxConfig>, Vec<(String, crate::Snapshot)>) {
         endpoint: format!("ssh://demo@{label}"),
         connect_on_start: false,
     };
-    let session = |id: &str, state| Session { id: id.into(), label: id.into(), state };
+    let session = |id: &str, state| Session {
+        id: id.into(),
+        label: id.into(),
+        state,
+        about: "zsh ~/src".into(),
+    };
     let agent = |session: &str, tab: &str, state, waiting_for, app: &str, message: &str| Agent {
         session: session.into(),
         window: tab.into(),
@@ -140,6 +145,9 @@ pub fn sample() -> (Vec<crate::BoxConfig>, Vec<(String, crate::Snapshot)>) {
         app: app.into(),
         message: Some(message.into()),
         place: format!("{session} / {tab}"),
+        since: std::time::Instant::now()
+            .checked_sub(Duration::from_secs(60 * (2 + message.len() as u64 % 9))),
+        progress: (state == S::Working).then_some(35),
     };
     let tab = |id: &str| Tab { id: id.into(), label: id.into() };
     let studio = Snapshot {

@@ -48,7 +48,10 @@ struct Args {
     /// With --demo: open an answer sheet
     #[arg(long, requires = "demo")]
     ask: bool,
-    /// Start with the sidebar and inbox closed
+    /// Start with the inbox open
+    #[arg(long)]
+    inbox: bool,
+    /// Start with the sidebar closed
     #[arg(long)]
     quiet: bool,
     /// With --bench: save this window (only) as a PPM image before exiting
@@ -100,6 +103,8 @@ enum Message {
     OpenAsked,
     Connect(String),
     Disconnect(String),
+    /// Waiting times on screen have moved on.
+    Minute,
     DemoTick,
     BenchDone,
     Captured(cosmic::iced::window::Screenshot),
@@ -244,12 +249,16 @@ impl App {
             .count()
     }
 
+    /// Every box's agents as one queue.
     fn inbox(&self) -> Vec<(&BoxConfig, &Snapshot, &Agent)> {
-        self.now
+        let mut all: Vec<_> = self
+            .now
             .iter()
             .filter_map(|(id, s)| Some((self.boxes.config(id)?, s)))
             .flat_map(|(c, s)| s.agents.iter().map(move |a| (c, s, a)))
-            .collect()
+            .collect();
+        all.sort_by(|a, b| Agent::by_urgency(a.2, b.2));
+        all
     }
 
     fn ask_fit(&mut self, block: String) {
@@ -370,7 +379,7 @@ impl Application for App {
             args,
         };
         app.core.window.context_is_overlay = false;
-        app.core.window.show_context = app.args.demo && !app.args.quiet;
+        app.core.window.show_context = app.args.inbox;
         if app.args.quiet && !app.args.demo {
             app.core.nav_bar_set_toggled(false);
         }
@@ -522,6 +531,7 @@ impl Application for App {
                     .map(|(id, _)| Message::Wake(id)),
             );
         }
+        all.push(cosmic::iced::time::every(Duration::from_secs(30)).map(|_| Message::Minute));
         if self.args.stress {
             all.push(cosmic::iced::time::every(Duration::from_millis(16)).map(|_| Message::DemoTick));
         }
@@ -756,6 +766,7 @@ impl Application for App {
                 self.boxes.disconnect(&id);
                 return self.refresh();
             }
+            Message::Minute => {}
             Message::DemoTick => {
                 if let Some(demo) = &mut self.demo {
                     demo.tick();
@@ -809,7 +820,8 @@ impl Application for App {
             };
             return page.push(notice(title, body, vec![button.into()])).into();
         };
-        if now.tabs.len() > 1 {
+        // With the sidebar open, tabs are rows under their session.
+        if now.tabs.len() > 1 && !self.core.nav_bar_active() {
             let mut tabs = widget::row::with_capacity(now.tabs.len()).spacing(4);
             for t in &now.tabs {
                 let active = now.tab.as_ref() == Some(&t.id);

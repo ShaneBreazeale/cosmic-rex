@@ -87,8 +87,8 @@ fn muted<'a>(text: impl Into<std::borrow::Cow<'a, str>> + 'a) -> Element<'a, Mes
     widget::text::caption(text).class(theme::Text::Color(c)).into()
 }
 
-/// A quiet row: neutral text, a soft fill on hover, and a raised fill with an accent edge when it
-/// is where the keyboard is. Accent means nothing else.
+/// A quiet row: neutral text, a soft fill on hover, a stronger one when it is open. The accent is
+/// left for the one thing that has the keyboard.
 fn row_class(selected: bool) -> theme::Button {
     let style = move |t: &Theme, fill: f32, text: f32| {
         let c = t.cosmic();
@@ -98,13 +98,9 @@ fn row_class(selected: bool) -> theme::Button {
         s.border_radius = c.radius_s().into();
         s.text_color = Some(Color { a: text, ..on });
         s.icon_color = s.text_color;
-        if selected {
-            s.border_width = 1.5;
-            s.border_color = c.accent_color().into();
-        }
         s
     };
-    let rest = if selected { 0.12 } else { 0.0 };
+    let rest = if selected { 0.14 } else { 0.0 };
     theme::Button::Custom {
         active: Box::new(move |focused, t| {
             let mut s = style(t, rest, 1.0);
@@ -174,6 +170,57 @@ fn tab_class(active: bool) -> theme::Button {
     }
 }
 
+/// A tab under its session: text only, brighter when it is the one on screen.
+fn tab_row_class(active: bool) -> theme::Button {
+    let style = |t: &Theme, fill: f32, text: f32| {
+        let c = t.cosmic();
+        let on: Color = c.on_primary_container_color().into();
+        let mut s = widget::button::Style::new();
+        s.background = Some(Background::Color(Color { a: fill, ..on }));
+        s.border_radius = c.radius_s().into();
+        s.text_color = Some(Color { a: text, ..on });
+        s
+    };
+    let text = if active { 1.0 } else { 0.6 };
+    theme::Button::Custom {
+        active: Box::new(move |_, t| style(t, 0.0, text)),
+        disabled: Box::new(move |t| style(t, 0.0, 0.5)),
+        hovered: Box::new(move |_, t| style(t, 0.06, 1.0)),
+        pressed: Box::new(move |_, t| style(t, 0.12, 1.0)),
+    }
+}
+
+type Text<'a> = widget::Text<'a, Theme>;
+
+fn one_line(text: Text<'_>) -> Text<'_> {
+    use cosmic::iced::advanced::text::{Ellipsize, EllipsizeHeightLimit, Wrapping};
+    text.wrapping(Wrapping::None).ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1)))
+}
+
+fn faint<'a>(text: impl Into<std::borrow::Cow<'a, str>> + 'a) -> Text<'a> {
+    let c = Color { a: 0.7, ..Color::from(theme::active().cosmic().on_bg_color()) };
+    widget::text::caption(text).class(theme::Text::Color(c))
+}
+
+/// The short fact at a row's edge: progress while working, how long otherwise.
+fn edge(a: &Agent) -> String {
+    match (a.state, a.progress, a.since) {
+        (AgentState::Idle, ..) => String::new(),
+        (AgentState::Working, Some(p), _) => format!("{p}%"),
+        (_, _, Some(since)) => elapsed(since.elapsed()),
+        _ => String::new(),
+    }
+}
+
+pub fn elapsed(d: std::time::Duration) -> String {
+    match d.as_secs() {
+        0..60 => "now".into(),
+        s @ 60..3600 => format!("{} min", s / 60),
+        s @ 3600..86400 => format!("{} h", s / 3600),
+        s => format!("{} d", s / 86400),
+    }
+}
+
 pub struct BoxRow<'a> {
     pub config: &'a BoxConfig,
     /// None while this box is disconnected by choice.
@@ -213,28 +260,50 @@ pub fn sidebar<'a>(rows: Vec<BoxRow<'a>>, current: Option<&str>) -> Element<'a, 
             let selected = online
                 && current == Some(id.as_str())
                 && now.session.as_deref() == Some(s.id.as_str());
-            let needing = now
-                .agents
-                .iter()
-                .filter(|a| {
-                    a.session == s.id && matches!(a.state, AgentState::Blocked | AgentState::Error)
-                })
-                .count();
-            let mut line = widget::row::with_capacity(3)
+            // The agent that most needs a look speaks for its session.
+            let top = now.agents.iter().find(|a| a.session == s.id);
+            let news = top.map_or_else(String::new, edge);
+            let name = widget::row::with_capacity(2)
+                .spacing(8)
+                .push(one_line(widget::text::body(s.label.as_str())).width(Length::Fill))
+                .push(muted(news));
+            let says = match top {
+                Some(a) => match &a.message {
+                    Some(m) if a.state != AgentState::Idle => format!("{}: {m}", word(a)),
+                    _ => word(a).to_owned(),
+                },
+                None => s.about.clone(),
+            };
+            let lines = widget::column::with_capacity(2)
+                .push(name)
+                .push(one_line(faint(says)).width(Length::Fill));
+            let line = widget::row::with_capacity(2)
                 .spacing(8)
                 .align_y(Alignment::Center)
                 .push(status(s.state))
-                .push(widget::text::body(s.label.as_str()).width(Length::Fill));
-            if needing > 0 {
-                line = line.push(muted(needing.to_string()));
-            }
+                .push(lines.width(Length::Fill));
             // Sessions of an unreachable box are what was last seen, and can't be opened.
             list = list.push(
-                widget::button::custom(line.padding([4, 4, 4, 16]))
+                widget::button::custom(line.padding([2, 2, 2, 6]))
                     .width(Length::Fill)
                     .class(row_class(selected))
                     .on_press_maybe(online.then(|| Message::OpenSession(id.clone(), s.id.clone()))),
             );
+            if selected && now.tabs.len() > 1 {
+                for t in &now.tabs {
+                    let active = now.tab.as_ref() == Some(&t.id);
+                    list = list.push(
+                        widget::button::custom(
+                            one_line(widget::text::caption(t.label.as_str()))
+                                .width(Length::Fill),
+                        )
+                        .padding([4, 8, 4, 44])
+                        .width(Length::Fill)
+                        .class(tab_row_class(active))
+                        .on_press(Message::Tab(t.id.clone())),
+                    );
+                }
+            }
         }
         if online && now.sessions.is_empty() {
             list = list.push(widget::container(muted("No sessions")).padding([2, 8, 6, 40]));
@@ -294,7 +363,7 @@ pub fn inbox<'a>(items: Vec<(&'a BoxConfig, &'a Snapshot, &'a Agent)>) -> Elemen
                 .align_y(Alignment::Center)
                 .push(status(a.state))
                 .push(widget::text::heading(word(a)).width(Length::Fill))
-                .push(muted(if now.connected { "" } else { "Last seen" }));
+                .push(muted(if now.connected { edge(a) } else { "Last seen".to_owned() }));
             let place = widget::row::with_capacity(2)
                 .spacing(8)
                 .align_y(Alignment::Center)

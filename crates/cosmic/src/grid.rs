@@ -475,7 +475,6 @@ impl<M> Grid<'_, M> {
             let border = Border { radius: radius.into(), ..Default::default() };
             r.fill_quad(renderer::Quad { bounds, border, ..Default::default() }, Background::Color(c));
         };
-        let on: Color = c.on_primary_container_color().into();
         let label = |r: &mut Renderer, text: &str, x: f32, width: f32, size: f32, color: Color| {
             use cosmic::iced::advanced::text::{self, Renderer as _};
             // Cut here: the renderer wraps rather than ellipsizes, whatever it is asked.
@@ -498,8 +497,13 @@ impl<M> Grid<'_, M> {
                 clip,
             );
         };
-        // The card: header above, terminal below, one rounded outline.
-        rounded(r, rect, c.primary_container_color().into(), radius);
+        // One surface: the header sits on the terminal's own background.
+        let (ground, ink) = pane.frame.as_ref().map_or_else(
+            || (Color::from(c.bg_color()), Color::from(c.on_bg_color())),
+            |f| (color(f.bg()), color(f.fg())),
+        );
+        rounded(r, rect, ground, radius);
+        let on = Color { a: if pane.focused { 1.0 } else { 0.7 }, ..ink };
         let chip = Rectangle { x: rect.x + 8.0, y: rect.y + 5.0, width: 22.0, height: 18.0 };
         rounded(r, chip, self.identity.tint, c.radius_xs());
         label(r, &self.identity.monogram, chip.x + 3.0, 20.0, 11.0, Color::WHITE);
@@ -507,7 +511,7 @@ impl<M> Grid<'_, M> {
         let end = size.as_ref().map_or(rect.x + rect.width - 28.0, |(c, _)| c.x);
         label(r, &pane.title, rect.x + 38.0, (end - rect.x - 46.0).max(0.0), 13.0, on);
         if let Some((bounds, text)) = &size {
-            rounded(r, *bounds, c.primary_component_color().into(), c.radius_xl());
+            rounded(r, *bounds, Color { a: 0.1, ..ink }, c.radius_xl());
             label(r, text, bounds.x + 8.0, bounds.width - 8.0, 11.0, on);
         }
         if pane.state != rex_backend::AgentState::Idle {
@@ -520,7 +524,7 @@ impl<M> Grid<'_, M> {
                 r.fill_quad(
                     renderer::Quad {
                         bounds: rect,
-                        border: Border { color: accent, width: 2.0, radius: radius.into() },
+                        border: Border { color: accent, width: 1.5, radius: radius.into() },
                         ..Default::default()
                     },
                     Background::Color(Color::TRANSPARENT),
@@ -529,11 +533,9 @@ impl<M> Grid<'_, M> {
         };
         let lower = [0.0, 0.0, radius[2], radius[3]];
         let Some(frame) = &pane.frame else {
-            rounded(r, body, c.bg_color().into(), lower);
             outline(r);
             return;
         };
-        rounded(r, body, color(frame.bg()), lower);
         let origin = Point::new(body.x + PAD, body.y + PAD);
         let rect = body;
         let visible = (((rect.height - 2.0 * PAD) / m.cell.height).floor().max(1.0) as usize).max(1);
