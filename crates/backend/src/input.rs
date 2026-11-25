@@ -15,7 +15,7 @@ use std::{
     collections::VecDeque,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -42,12 +42,25 @@ pub(crate) struct State {
     /// methods come in order, so ids are not needed.
     waiting: Mutex<VecDeque<Instant>>,
     limit: AtomicUsize,
+    /// Smoothed time to an answer, in microseconds; 0 until one arrives.
+    round_trip: AtomicU64,
     notice: Mutex<Option<String>>,
 }
 
 impl State {
     fn age(&self) -> Option<Duration> {
         self.waiting.lock().expect("waiting").front().map(Instant::elapsed)
+    }
+    fn answered(&self) {
+        if let Some(sent) = self.waiting.lock().expect("waiting").pop_front() {
+            let new = sent.elapsed().as_micros() as u64;
+            let old = self.round_trip.load(Ordering::Relaxed);
+            let next = if old == 0 { new } else { (old * 7 + new) / 8 };
+            self.round_trip.store(next.max(1), Ordering::Relaxed);
+        }
+    }
+    pub fn round_trip(&self) -> Duration {
+        Duration::from_micros(self.round_trip.load(Ordering::Relaxed))
     }
     pub fn live(&self) -> bool {
         self.up.load(Ordering::Acquire) && self.age().is_none_or(|a| a < STALL)
@@ -280,7 +293,7 @@ async fn carry(
             answer = next_json(&mut socket) => {
                 let answer = answer?;
                 if answer["type"] == "response" {
-                    state.waiting.lock().expect("waiting").pop_front();
+                    state.answered();
                     if let Some(message) = answer["error"]["message"].as_str() {
                         *state.notice.lock().expect("notice") =
                             Some(format!("Not typed: {}", crate::plain(message, 200)));

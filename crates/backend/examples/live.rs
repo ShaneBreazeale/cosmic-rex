@@ -145,6 +145,46 @@ fn checks(mac: &HostConnection, host: &Host, block: &str, session: &str) -> Chec
     println!("      echo, pane owned here:      median {} ms, worst {} ms", fast[3], fast[6]);
     host.key(block, &Key { mods: "ctrl".into(), text: String::new(), ..key("key_u", "u", KeyAction::Press) });
 
+    // Local echo: how soon a letter is drawn, and that it was right.
+    let line = "echo the quick brown fox";
+    let (mut drawn, mut slowest) = (0, Duration::ZERO);
+    for c in line.chars() {
+        let name = if c == ' ' { "space".to_owned() } else { format!("key_{c}") };
+        let start = Instant::now();
+        host.key(block, &key(&name, &c.to_string(), KeyAction::Press));
+        if host.snapshot().panes[0].guess.ends_with(c) {
+            drawn += 1;
+            slowest = slowest.max(start.elapsed());
+        }
+        host.key(block, &key(&name, "", KeyAction::Release));
+        for _ in 0..10 {
+            std::thread::sleep(Duration::from_millis(10));
+            host.snapshot();
+        }
+    }
+    println!("      local echo: {drawn} of {} letters drawn at once, slowest {:.2} ms", line.len(), slowest.as_secs_f64() * 1000.0);
+    ensure(drawn > line.len() / 2, "most typing is drawn before the server answers")?;
+    until("the guesses to be confirmed", 10, || {
+        let s = host.snapshot();
+        (s.panes[0].guess.is_empty() && screen(&s).contains(line)).then_some(())
+    })?;
+    pass("and the server agreed with all of it");
+    host.key(block, &Key { mods: "ctrl".into(), text: String::new(), ..key("key_u", "u", KeyAction::Press) });
+    run(host, block, "printf 'Pass''word: '; read -s x; echo; echo got-${#x}");
+    until("the password prompt", 15, || screen(&host.snapshot()).contains("Password:").then_some(()))?;
+    std::thread::sleep(Duration::from_millis(500));
+    let mut leaked = false;
+    for c in "hunterabc".chars() {
+        host.key(block, &key(&format!("key_{c}"), &c.to_string(), KeyAction::Press));
+        for _ in 0..15 {
+            leaked |= !host.snapshot().panes[0].guess.is_empty();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    host.key(block, &key("enter", "\n", KeyAction::Press));
+    until("the password to arrive", 15, || screen(&host.snapshot()).contains("got-9").then_some(()))?;
+    ensure(!leaked, "nothing typed at a password prompt was ever drawn")?;
+
     let t = Instant::now();
     for _ in 0..1000 {
         std::hint::black_box(host.snapshot());

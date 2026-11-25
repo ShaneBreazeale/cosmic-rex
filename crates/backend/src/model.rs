@@ -78,6 +78,8 @@ pub struct PaneView {
     /// Output and input are both flowing. A frame without this is only the last one seen.
     pub live: bool,
     pub state: AgentState,
+    /// Typed but not yet echoed, to draw from the cursor on. Local echo; may be wrong.
+    pub guess: String,
 }
 
 #[derive(Clone, Default)]
@@ -160,6 +162,7 @@ impl Snapshot {
                             .map(|a| a.state)
                             .unwrap_or_default(),
                         live,
+                        guess: String::new(),
                         block: p.block,
                         rect: p.rect,
                         frame,

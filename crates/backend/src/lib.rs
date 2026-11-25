@@ -10,10 +10,12 @@ mod frame;
 mod host;
 mod input;
 mod model;
+mod predict;
 
 pub use boxes::{BoxConfig, Boxes, TINTS};
 pub use frame::{CellRef, CursorShape, Frame, Underline};
 pub use host::{Host, Key, KeyAction, Split, Wake};
+pub use predict::set_local_echo;
 pub use model::{Agent, AgentState, PaneView, Session, Size, Snapshot, Tab, WaitingFor, plain};
 
 /// Call once before anything else.

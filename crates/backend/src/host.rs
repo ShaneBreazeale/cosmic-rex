@@ -1,5 +1,5 @@
 //! One connected Rex server.
-use crate::{Size, Snapshot, input::Input, model::size};
+use crate::{Size, Snapshot, input::Input, model::size, predict::Predictor};
 use rex_rune::{
     connection::{
         Command, Connection, DEFAULT_TAB_LABEL, HostCommand, HostConnection, perform::Outcome,
@@ -44,6 +44,17 @@ pub struct Key {
 }
 
 impl Key {
+    /// The one character this types, if it is plain typing.
+    fn plain(&self) -> Option<char> {
+        let mut chars = self.text.chars();
+        let c = chars.next().filter(|c| *c == ' ' || c.is_ascii_graphic())?;
+        (chars.next().is_none() && matches!(self.mods.as_str(), "" | "shift")).then_some(c)
+    }
+    fn is_modifier(&self) -> bool {
+        ["shift_", "control_", "alt_", "meta_", "super_", "caps_lock", "num_lock", "fn"]
+            .iter()
+            .any(|name| self.name.starts_with(name))
+    }
     fn payload(&self) -> Value {
         json!({
             "key": self.name,
@@ -77,6 +88,7 @@ pub struct Host {
     navigation: Mutex<u64>,
     /// Unclaimed panes this client has asked to size, once each.
     asked: Mutex<HashSet<String>>,
+    predictors: Mutex<HashMap<String, Predictor>>,
 }
 
 fn next_serial() -> u64 {
@@ -97,6 +109,7 @@ impl Host {
             terminals: Mutex::default(),
             navigation: Mutex::new(0),
             asked: Mutex::default(),
+            predictors: Mutex::default(),
         }
     }
 
@@ -124,9 +137,21 @@ impl Host {
         }
         // A pane is live only if typing reaches it too.
         let typing = self.input.state.live();
+        let round_trip = self.input.state.round_trip();
+        let mut predictors = self.predictors.lock().expect("predictors");
+        predictors.retain(|block, _| snapshot.panes.iter().any(|p| &p.block == block));
         for pane in &mut snapshot.panes {
             pane.live &= typing;
+            if let (Some(frame), Some(p)) = (&pane.frame, predictors.get_mut(&pane.block)) {
+                p.observe(frame, Instant::now(), round_trip);
+                if pane.live {
+                    pane.guess = p.show(frame, round_trip);
+                } else {
+                    p.reset();
+                }
+            }
         }
+        drop(predictors);
         if snapshot.connected && snapshot.notice.is_none() {
             snapshot.notice = self.input.take_notice();
         }
@@ -157,25 +182,28 @@ impl Host {
 
     /// Send input to a live pane, without ever taking its size from another client. What is
     /// typed at a dead screen is dropped, never queued for later.
-    fn type_into(&self, block: &str, method: &'static str, mut payload: Value, claims: bool) {
+    fn type_into(&self, block: &str, method: &'static str, mut payload: Value, claims: bool) -> bool {
         let (session, size) = {
             let m = self.core.model.lock().expect("host model");
-            let Some(session) = m.selected.clone() else { return };
+            let Some(session) = m.selected.clone() else { return false };
             let live = m.connected
                 && m.terminals.get(block).is_some_and(|c| {
                     let t = c.model.lock().expect("terminal model");
                     t.connected && t.control_connected
                 });
             if !live {
-                return;
+                return false;
             }
             let size = size(&m, &session, block);
             (session, size)
         };
         payload["session_id"] = json!(session);
         payload["block_id"] = json!(block);
-        if !self.input.send(method, payload) || !claims {
-            return;
+        if !self.input.send(method, payload) {
+            return false;
+        }
+        if !claims {
+            return true;
         }
         self.scroll(block, TO_BOTTOM);
         // Using a pane nobody has sized gives it this window's size. `request` cannot take one
@@ -189,15 +217,27 @@ impl Host {
                 payload: json!({"session_id": session, "block_ids": [block], "mode": "request"}),
             });
         }
+        true
     }
 
     pub fn key(&self, block: &str, key: &Key) {
         let press = key.action != KeyAction::Release;
-        self.type_into(block, "client.key", json!({"key": key.payload()}), press);
+        if self.type_into(block, "client.key", json!({"key": key.payload()}), press) && press {
+            self.predict(block, |p| match key.plain() {
+                Some(c) => p.typed(c, Instant::now()),
+                None if key.is_modifier() => {}
+                None => p.reset(),
+            });
+        }
     }
     pub fn paste(&self, block: &str, text: String) {
         let event = json!({"event": {"type": "paste", "payload": {"text": text}}});
-        self.type_into(block, "block.event", event, true);
+        if self.type_into(block, "block.event", event, true) {
+            self.predict(block, Predictor::reset);
+        }
+    }
+    fn predict(&self, block: &str, act: impl FnOnce(&mut Predictor)) {
+        act(self.predictors.lock().expect("predictors").entry(block.to_owned()).or_default());
     }
     /// Take this pane's size, on the person's explicit request: every client viewing it re-wraps.
     pub fn fit_here(&self, session: &str, block: &str) {
@@ -371,6 +411,7 @@ mod tests {
             terminals: Mutex::default(),
             navigation: Mutex::new(0),
             asked: Mutex::default(),
+            predictors: Mutex::default(),
         };
         host.snapshot();
         (host, sent, typed)

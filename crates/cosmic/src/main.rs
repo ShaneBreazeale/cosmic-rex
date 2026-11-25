@@ -38,6 +38,9 @@ struct Args {
     /// Exit after this many seconds (with --demo, print draw statistics)
     #[arg(long)]
     bench: Option<u64>,
+    /// Wait for the server to echo typing instead of showing it at once
+    #[arg(long)]
+    no_local_echo: bool,
     /// Start with the sidebar and inbox closed
     #[arg(long)]
     quiet: bool,
@@ -54,6 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("--font-size must be between 6 and 72".into());
     }
     rex_backend::init();
+    rex_backend::set_local_echo(!args.no_local_echo);
     let settings = Settings::default().size(Size::new(1280.0, 800.0));
     cosmic::app::run::<App>(settings, args)?;
     // Let host workers close their control connections, so the server drops this client at once.
@@ -440,6 +444,17 @@ impl Application for App {
             .into_iter()
             .map(|(id, w)| Subscription::run_with(Wakes(id, w), wakes))
             .collect();
+        // A guess the server never confirms must not stay on screen.
+        if let Some(id) = &self.current
+            && self.panes().iter().any(|p| !p.guess.is_empty())
+        {
+            let id = id.clone();
+            all.push(
+                cosmic::iced::time::every(Duration::from_millis(200))
+                    .with(id)
+                    .map(|(id, _)| Message::Wake(id)),
+            );
+        }
         if self.demo.is_some() {
             all.push(cosmic::iced::time::every(Duration::from_millis(16)).map(|_| Message::DemoTick));
         }
@@ -487,6 +502,12 @@ impl Application for App {
                     Action::Key(key) => {
                         if let Some(block) = now.focused() {
                             host.key(block, &key);
+                            // Draw what was typed now, not when the server next speaks.
+                            if key.action != rex_backend::KeyAction::Release {
+                                return self.current.clone().map_or_else(Task::none, |id| {
+                                    self.update(Message::Wake(id))
+                                });
+                            }
                         }
                     }
                     Action::Scroll(block, n) => host.scroll(&block, n),

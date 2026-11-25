@@ -91,6 +91,7 @@ impl Demo {
                 title: ["claude-code", "cargo test"][i].into(),
                 size: [crate::Size::Elsewhere, crate::Size::Here][i],
                 live: true,
+                guess: String::new(),
                 state: [crate::AgentState::Blocked, crate::AgentState::Working][i],
             })
             .collect()

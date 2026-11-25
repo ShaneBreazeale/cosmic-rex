@@ -83,12 +83,32 @@ type Segments = Arc<[(usize, Arc<ct::Buffer>)]>;
 #[derive(Default)]
 pub struct Cache {
     panes: RefCell<HashMap<String, Vec<Row>>>,
+    /// Guessed text being drawn; the renderer only keeps weak references.
+    guesses: RefCell<HashMap<String, (String, Arc<ct::Buffer>)>>,
     pub shaped: std::cell::Cell<u64>,
 }
 
 impl Cache {
     pub fn retain(&self, keep: impl Fn(&str) -> bool) {
         self.panes.borrow_mut().retain(|block, _| keep(block));
+        self.guesses.borrow_mut().retain(|block, _| keep(block));
+    }
+
+    fn guess(&self, block: &str, text: &str, m: Metrics) -> Arc<ct::Buffer> {
+        let mut guesses = self.guesses.borrow_mut();
+        if let Some((old, buffer)) = guesses.get(block)
+            && old == text
+        {
+            return buffer.clone();
+        }
+        let mut fonts = font_system().write().expect("font system");
+        let mut buffer = ct::Buffer::new(fonts.raw(), ct::Metrics::new(m.size, m.cell.height));
+        buffer.set_wrap(ct::Wrap::None);
+        buffer.set_text(text, &attrs(), ct::Shaping::Advanced, None);
+        buffer.shape_until_scroll(fonts.raw(), false);
+        let buffer = Arc::new(buffer);
+        guesses.insert(block.to_owned(), (text.to_owned(), buffer.clone()));
+        buffer
     }
 
     fn rows(&self, block: &str, frame: &Frame, m: Metrics) -> Vec<Segments> {
@@ -569,7 +589,21 @@ impl<M> Grid<'_, M> {
             && let Some((x, y)) = frame.cursor()
             && (first..first + visible).contains(&(y as usize))
         {
-            let b = cell(x as usize, y as usize, 1);
+            let guessed = pane.guess.chars().count();
+            if guessed > 0 {
+                // Underlined until the server confirms it.
+                let span = cell(x as usize, y as usize, guessed);
+                fill(r, span, color(frame.bg()));
+                r.fill_raw(Raw {
+                    buffer: Arc::downgrade(&self.cache.guess(&pane.block, &pane.guess, m)),
+                    position: span.position(),
+                    color: color(frame.fg()),
+                    clip_bounds: clip,
+                });
+                let line = Rectangle { y: span.y + span.height - 2.0, height: 1.0, ..span };
+                fill(r, line, Color { a: 0.5, ..color(frame.fg()) });
+            }
+            let b = cell(x as usize + guessed, y as usize, 1);
             let c = color(frame.cursor_color());
             if !pane.focused {
                 r.fill_quad(
