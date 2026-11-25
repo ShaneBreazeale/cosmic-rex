@@ -2,7 +2,9 @@
 //!
 //! Creates one throwaway session, uses only that, and destroys it at the end whatever happens.
 //! A second client stands in for the Mac app. Prints nothing about any other session.
-use rex_backend::{AgentState, Host, Key, KeyAction, Size, Snapshot, WaitingFor};
+use rex_backend::{
+    AgentState, AnswerKey, Host, Key, KeyAction, Outcome, Reply, Size, Snapshot, WaitingFor,
+};
 use rex_rune::connection::{HostCommand, HostConnection, HumanClose};
 use std::{
     collections::BTreeSet,
@@ -91,6 +93,65 @@ fn burst(host: &Host, block: &str, releases: bool) -> Result<u128, String> {
     host.key(block, &Key { mods: "ctrl".into(), text: String::new(), ..key("key_u", "u", KeyAction::Press) });
     std::thread::sleep(Duration::from_secs(1));
     Ok(lag)
+}
+
+fn block_on<T>(future: impl Future<Output = T>) -> T {
+    tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(future)
+}
+
+/// A program that asks `A?`, and asks `B?` in its place if told to, then reads one line.
+fn ask(host: &Host, block: &str, n: u32, change: bool) -> Check {
+    let report = |msg: &str| format!(r"printf '\033]7501;state=blocked:kind=permission:app=live-test:msg={msg}\033\\'");
+    let then = if change { format!("sleep 3; {}; ", report("Qj8=")) } else { String::new() };
+    let done = r"printf '\033]7501;state=working:app=live-test\033\\'";
+    run(host, block, &format!(
+        "clear; sh -c {}",
+        quote(&format!("{}; echo proceed-{n}; {then}read a; {done}; echo got-{n}-$a; sleep 2", report("QT8=")))
+    ));
+    until("the question", 20, || {
+        let s = host.snapshot();
+        (screen(&s).contains(&format!("proceed-{n}"))
+            && s.agents.iter().any(|a| a.block == block && a.state == AgentState::Blocked && a.message.as_deref() == Some("A?")))
+        .then_some(())
+    })
+}
+fn quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+fn answers(host: &Host, block: &str, session: &str) -> Check {
+    let q = || block_on(host.asker().question(session.to_owned(), block.to_owned()));
+    ask(host, block, 1, false)?;
+    let question = q()?;
+    ensure(
+        question.message.as_deref() == Some("A?") && question.screen.iter().any(|l| l.contains("proceed-1")),
+        "a question is read with its screen, without attaching",
+    )?;
+    let t = Instant::now();
+    let outcome = block_on(host.asker().answer(question.ticket.clone(), Reply::Line("yes please".into())));
+    println!("      answered in {} ms: {outcome:?}", t.elapsed().as_millis());
+    ensure(outcome == Outcome::Reacted, "an answered program reacts")?;
+    until("the answer on screen", 10, || screen(&host.snapshot()).contains("got-1-yes please").then_some(()))?;
+    let again = block_on(host.asker().answer(question.ticket, Reply::Key(AnswerKey::Enter)));
+    ensure(again == Outcome::Changed, "the same question can't be answered twice")?;
+    std::thread::sleep(Duration::from_secs(3));
+
+    ask(host, block, 2, true)?;
+    let question = q()?;
+    until("the program to change its question", 15, || {
+        host.snapshot().agents.iter().any(|a| a.block == block && a.message.as_deref() == Some("B?")).then_some(())
+    })?;
+    let stale = block_on(host.asker().answer(question.ticket, Reply::Line("WRONG".into())));
+    ensure(stale == Outcome::Changed, "an answer to a replaced question is refused")?;
+    std::thread::sleep(Duration::from_secs(1));
+    ensure(!screen(&host.snapshot()).contains("WRONG"), "and nothing of it was typed")?;
+    let outcome = block_on(host.asker().answer(q()?.ticket, Reply::Line("right".into())));
+    ensure(outcome == Outcome::Reacted, "the new question can be answered")?;
+    std::thread::sleep(Duration::from_secs(3));
+    ensure(
+        host.snapshot().agents.iter().all(|a| a.block != block || a.state != AgentState::Blocked),
+        "nothing is left waiting",
+    )
 }
 
 fn pass(what: &str) {
@@ -192,12 +253,11 @@ fn checks(mac: &HostConnection, host: &Host, block: &str, session: &str) -> Chec
     println!("      snapshot: {:.1} us each", t.elapsed().as_secs_f64() * 1000.0);
     println!("      burst lag, owned here:      {} ms ({} ms without releases)", burst(host, block, true)?, burst(host, block, false)?);
 
-    // "Run the live test?" as a blocked permission request, held by a foreground sleep.
-    run(
-        host,
-        block,
-        r"printf '\033]7501;state=blocked:kind=permission:app=live-test:msg=UnVuIHRoZSBsaXZlIHRlc3Q/\033\\'; sleep 30",
-    );
+    answers(host, block, session)?;
+
+    // "Run the live test?" as a blocked permission request, from a process of its own.
+    let report = r"printf '\033]7501;state=blocked:kind=permission:app=live-test:msg=UnVuIHRoZSBsaXZlIHRlc3Q/\033\\'";
+    run(host, block, &format!("sh -c {}", quote(&format!("{report}; sleep 30"))));
     let agent = until("the status report", 15, || {
         host.snapshot().agents.into_iter().find(|a| a.block == block && a.state == AgentState::Blocked)
     })?;

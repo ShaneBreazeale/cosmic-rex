@@ -13,6 +13,14 @@ struct Source {
     frame: Frame,
 }
 
+const CARGO: &str = "$ cargo test --workspace\r\n\
+    \x1b[1;32m   Compiling\x1b[0m invoice v0.4.1\r\n\
+    \x1b[1;32m    Finished\x1b[0m test profile in 8.42s\r\n\
+    \x1b[1;32m     Running\x1b[0m unittests src/lib.rs\r\n\r\n\
+    test routes::missing_id_is_404 ... \x1b[32mok\x1b[0m\r\n\
+    test routes::totals_round ... \x1b[32mok\x1b[0m\r\n\
+    test store::migrates ... ";
+
 pub struct Demo {
     sources: Vec<Source>,
     ticks: u64,
@@ -45,7 +53,7 @@ impl Demo {
         Self {
             sources: vec![
                 make("demo:styles", [0.0, 0.0, 0.4, 1.0], styles),
-                make("demo:busy", [0.4, 0.0, 0.6, 1.0], ""),
+                make("demo:busy", [0.4, 0.0, 0.6, 1.0], CARGO),
             ],
             ticks: 0,
             build: Duration::ZERO,
@@ -170,4 +178,26 @@ pub fn sample() -> (Vec<crate::BoxConfig>, Vec<(String, crate::Snapshot)>) {
         vec![config(1, "studio", "ST"), config(2, "forge", "FG"), config(3, "attic", "AT")],
         vec![("box-1".into(), studio), ("box-2".into(), forge), ("box-3".into(), attic)],
     )
+}
+
+/// An invented question to look at.
+pub fn question(agent: &crate::Agent) -> crate::Question {
+    let screen = [
+        "● Updated src/routes/invoice.rs",
+        "",
+        "  Run command",
+        "    cargo test --workspace",
+        "",
+        "  Do you want to proceed?",
+        "  ❯ 1. Yes",
+        "    2. Yes, and do not ask again for cargo test",
+        "    3. No, and say what to do instead",
+    ];
+    crate::Question {
+        waiting_for: agent.waiting_for,
+        app: agent.app.clone(),
+        message: agent.message.clone(),
+        screen: screen.map(str::to_owned).to_vec(),
+        ticket: crate::Ticket::sample(),
+    }
 }

@@ -4,6 +4,7 @@
 //! new core revision changes something, the fix belongs here and frontends don't notice.
 #![forbid(unsafe_code)]
 
+mod answer;
 mod boxes;
 pub mod demo;
 mod frame;
@@ -12,6 +13,7 @@ mod input;
 mod model;
 mod predict;
 
+pub use answer::{AnswerKey, Asker, Outcome, Question, Reply, Ticket, pause};
 pub use boxes::{BoxConfig, Boxes, TINTS};
 pub use frame::{CellRef, CursorShape, Frame, Underline};
 pub use host::{Host, Key, KeyAction, Split, Wake};

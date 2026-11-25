@@ -23,3 +23,5 @@ Safety: attaching never creates, stops or destroys anything. Status text is stri
 Licences: this repo and rex-rune are MIT; libcosmic is MPL-2.0 (used as a dependency). cosmic-term is GPL-3.0: its code must not be copied here.
 
 Local echo: `predict.rs` draws typed characters before the server echoes them (underlined until confirmed). Guesses are hidden until one has come true since the last Enter, control key or unexplained cursor move, so nothing typed at a prompt that does not echo is drawn. Off on links under 25 ms, when the cursor is hidden, or with `--no-local-echo`.
+
+Answering: `answer.rs` reads a waiting program's report and the end of its screen, and sends keys or one line of text. Right before sending it re-reads the report and refuses unless the server's `updated_at`, id, kind and message are exactly those shown. Sign-in requests are refused. Nothing is ever sent twice. One network trip remains in which a program could change its mind.

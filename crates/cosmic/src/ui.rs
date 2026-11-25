@@ -272,7 +272,7 @@ pub fn sidebar<'a>(rows: Vec<BoxRow<'a>>, current: Option<&str>) -> Element<'a, 
         .into()
 }
 
-/// One queue across every box. Rows open the pane; nothing is answered from here.
+/// One queue across every box. A waiting row opens its answer sheet; others go to the pane.
 pub fn inbox<'a>(items: Vec<(&'a BoxConfig, &'a Snapshot, &'a Agent)>) -> Element<'a, Message> {
     let mut list = widget::column::with_capacity(items.len() + 4).spacing(8);
     let mut shown = false;
@@ -323,10 +323,120 @@ pub fn inbox<'a>(items: Vec<(&'a BoxConfig, &'a Snapshot, &'a Agent)>) -> Elemen
                     .width(Length::Fill)
                     .class(card_class())
                     .on_press_maybe(now.connected.then(|| {
-                        Message::OpenAgent(config.id.clone(), a.session.clone(), a.window.clone())
+                        if a.state == AgentState::Blocked {
+                            Message::Ask(config.id.clone(), Box::new((*a).clone()))
+                        } else {
+                            Message::OpenAgent(config.id.clone(), a.session.clone(), a.window.clone())
+                        }
                     })),
             );
         }
     }
     if shown { list.into() } else { widget::text::body("Nothing needs you.").into() }
+}
+
+/// A program's words, framed, never on a line with ours.
+fn quoted<'a>(lines: impl Iterator<Item = &'a str>, size: f32) -> Element<'a, Message> {
+    let column = lines.fold(widget::column::with_capacity(4), |c, line| {
+        // An empty line still takes its height.
+        let line = if line.is_empty() { " " } else { line };
+        c.push(
+            widget::text::monotext(line)
+                .size(size)
+                .wrapping(cosmic::iced::advanced::text::Wrapping::None),
+        )
+    });
+    widget::container(column)
+        .padding([8, 12])
+        .width(Length::Fill)
+        .clip(true)
+        .class(theme::Container::custom(|t: &Theme| {
+            let c = t.cosmic();
+            widget::container::Style {
+                background: Some(Background::Color(c.bg_color().into())),
+                text_color: Some(c.on_bg_color().into()),
+                border: Border { radius: c.radius_s().into(), ..Default::default() },
+                ..Default::default()
+            }
+        }))
+        .into()
+}
+
+/// What an answer sheet shows about the question, and what can still be done with it.
+pub struct Sheet<'a> {
+    pub config: &'a BoxConfig,
+    pub agent: &'a Agent,
+    pub question: Option<Result<&'a rex_backend::Question, &'a str>>,
+    pub reply: &'a str,
+    pub outcome: Option<&'a str>,
+    /// Controls are on: the question is loaded, nothing is in flight, and it has been readable
+    /// for long enough that a key meant for something else can't land here.
+    pub armed: bool,
+}
+
+pub fn answer<'a>(s: Sheet<'a>) -> Element<'a, Message> {
+    let title = match s.agent.waiting_for {
+        Some(WaitingFor::Permission) => "Approval request",
+        Some(WaitingFor::Question) => "Question",
+        Some(WaitingFor::Auth) => "Sign-in request",
+        None => "Waiting for input",
+    };
+    let mut body = widget::column::with_capacity(8).spacing(12).push(
+        widget::row::with_capacity(2)
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .push(monogram(s.config))
+            .push(widget::text::body(format!("{} › {}", s.config.label, s.agent.place))),
+    );
+    let sign_in = s.agent.waiting_for == Some(WaitingFor::Auth);
+    match s.question {
+        None => body = body.push(muted("Reading the question…")),
+        Some(Err(e)) => body = body.push(widget::text::body(e)),
+        Some(Ok(q)) => {
+            body = body.push(muted(format!("The program reports itself as {}", q.app)));
+            if let Some(m) = &q.message {
+                body = body
+                    .push(widget::text::caption_heading("The program says"))
+                    .push(quoted(std::iter::once(m.as_str()), 13.0));
+            }
+            body = body
+                .push(widget::text::caption_heading("End of its screen"))
+                .push(quoted(q.screen.iter().map(String::as_str), 12.0));
+            if sign_in {
+                body = body.push(widget::text::body("Sign-in is answered in the terminal."));
+            } else if s.outcome.is_none() {
+                let mut keys = widget::row::with_capacity(8)
+                    .spacing(8)
+                    .align_y(Alignment::Center)
+                    .push(widget::text::caption("Send key"));
+                for k in rex_backend::AnswerKey::ALL {
+                    keys = keys.push(
+                        widget::button::standard(k.label())
+                            .on_press_maybe(s.armed.then_some(Message::AnswerKey(k))),
+                    );
+                }
+                let mut line = widget::text_input("Type a reply, then Enter", s.reply);
+                if s.armed {
+                    line = line.on_input(Message::AnswerDraft).on_submit(|_| Message::AnswerLine);
+                }
+                body = body.push(keys).push(line).push(muted(format!(
+                    "Goes to {}. Sent once, and only if the question is still this one.",
+                    s.config.label
+                )));
+            }
+        }
+    }
+    if let Some(outcome) = s.outcome {
+        body = body.push(widget::text::heading(outcome));
+    }
+    widget::dialog()
+        .title(title)
+        .control(body)
+        .primary_action(widget::button::suggested("Open terminal").on_press(Message::OpenAsked))
+        .secondary_action(
+            widget::button::standard(if s.outcome.is_some() { "Close" } else { "Cancel" })
+                .on_press(Message::CancelDialog),
+        )
+        .width(620)
+        .into()
 }

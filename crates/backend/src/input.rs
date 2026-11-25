@@ -12,7 +12,7 @@ use futures_util::{SinkExt as _, StreamExt as _};
 use rex_rune::{connection::HostModel, ssh, transport};
 use serde_json::{Value, json};
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -33,14 +33,15 @@ static RUNNING: AtomicUsize = AtomicUsize::new(0);
 pub(crate) struct Outgoing {
     pub method: &'static str,
     pub payload: Value,
+    /// Where the answer goes, if anyone wants it.
+    pub reply: Option<flume::Sender<Result<Value, String>>>,
 }
 
 #[derive(Default)]
 pub(crate) struct State {
     up: AtomicBool,
-    /// When each request still waiting for its answer was sent, oldest first. Answers to ordered
-    /// methods come in order, so ids are not needed.
-    waiting: Mutex<VecDeque<Instant>>,
+    /// Requests still waiting for an answer, oldest first. Not every method answers in order.
+    waiting: Mutex<VecDeque<(u64, Instant)>>,
     limit: AtomicUsize,
     /// Smoothed time to an answer, in microseconds; 0 until one arrives.
     round_trip: AtomicU64,
@@ -49,10 +50,12 @@ pub(crate) struct State {
 
 impl State {
     fn age(&self) -> Option<Duration> {
-        self.waiting.lock().expect("waiting").front().map(Instant::elapsed)
+        self.waiting.lock().expect("waiting").front().map(|(_, at)| at.elapsed())
     }
-    fn answered(&self) {
-        if let Some(sent) = self.waiting.lock().expect("waiting").pop_front() {
+    fn answered(&self, id: u64) {
+        let mut waiting = self.waiting.lock().expect("waiting");
+        let at = waiting.iter().position(|(w, _)| *w == id);
+        if let Some((_, sent)) = at.and_then(|at| waiting.remove(at)) {
             let new = sent.elapsed().as_micros() as u64;
             let old = self.round_trip.load(Ordering::Relaxed);
             let next = if old == 0 { new } else { (old * 7 + new) / 8 };
@@ -64,6 +67,33 @@ impl State {
     }
     pub fn live(&self) -> bool {
         self.up.load(Ordering::Acquire) && self.age().is_none_or(|a| a < STALL)
+    }
+}
+
+/// Sends on an [`Input`], and keeps it from closing no longer than one call.
+#[derive(Clone)]
+pub struct Sender {
+    queue: mpsc::WeakUnboundedSender<Outgoing>,
+    state: Arc<State>,
+}
+
+impl Sender {
+    /// Refused, not queued, while the link is not carrying requests.
+    pub(crate) async fn call(
+        &self,
+        method: &'static str,
+        payload: Value,
+    ) -> Result<Value, String> {
+        let down = || "The box is not connected".to_owned();
+        let (reply, answer) = flume::bounded(1);
+        {
+            let queue = self.queue.upgrade().filter(|_| self.state.live()).ok_or_else(down)?;
+            let next = Outgoing { method, payload, reply: Some(reply) };
+            queue.send(next).map_err(|_| down())?;
+        }
+        // Ends by itself: a connection that leaves a request unanswered is dropped (GIVE_UP),
+        // and its waiting replies with it.
+        answer.recv_async().await.unwrap_or_else(|_| Err("The box did not answer".into()))
     }
 }
 
@@ -110,7 +140,11 @@ impl Input {
 
     /// False when refused: nothing is kept to send later.
     pub fn send(&self, method: &'static str, payload: Value) -> bool {
-        self.state.live() && self.queue.send(Outgoing { method, payload }).is_ok()
+        self.state.live() && self.queue.send(Outgoing { method, payload, reply: None }).is_ok()
+    }
+
+    pub fn sender(&self) -> Sender {
+        Sender { queue: self.queue.downgrade(), state: self.state.clone() }
     }
 
     /// The newest problem, once.
@@ -263,6 +297,7 @@ async fn carry(
     connected: &impl Fn() -> bool,
 ) -> Result<(), String> {
     let mut id = 0u64;
+    let mut replies = HashMap::new();
     let mut tick = tokio::time::interval(TICK);
     let mut was_live = true;
     loop {
@@ -284,7 +319,10 @@ async fn carry(
                     let _ = wake.try_send(());
                     continue;
                 }
-                state.waiting.lock().expect("waiting").push_back(Instant::now());
+                state.waiting.lock().expect("waiting").push_back((id, Instant::now()));
+                if let Some(reply) = next.reply {
+                    replies.insert(id, reply);
+                }
                 tokio::time::timeout(STALL, socket.send(Message::text(message)))
                     .await
                     .map_err(|_| "the server is not reading".to_owned())?
@@ -292,9 +330,17 @@ async fn carry(
             }
             answer = next_json(&mut socket) => {
                 let answer = answer?;
-                if answer["type"] == "response" {
-                    state.answered();
-                    if let Some(message) = answer["error"]["message"].as_str() {
+                if answer["type"] == "response"
+                    && let Some(id) = answer["id"].as_str().and_then(|id| id.parse::<u64>().ok())
+                {
+                    state.answered(id);
+                    let error = answer["error"]["message"].as_str();
+                    if let Some(reply) = replies.remove(&id) {
+                        let _ = reply.send(match error {
+                            Some(message) => Err(crate::plain(message, 200)),
+                            None => Ok(answer["payload"].clone()),
+                        });
+                    } else if let Some(message) = error {
                         *state.notice.lock().expect("notice") =
                             Some(format!("Not typed: {}", crate::plain(message, 200)));
                         let _ = wake.try_send(());

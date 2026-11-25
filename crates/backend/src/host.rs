@@ -55,7 +55,7 @@ impl Key {
             .iter()
             .any(|name| self.name.starts_with(name))
     }
-    fn payload(&self) -> Value {
+    pub(crate) fn payload(&self) -> Value {
         json!({
             "key": self.name,
             "mods": self.mods,
@@ -239,6 +239,11 @@ impl Host {
     fn predict(&self, block: &str, act: impl FnOnce(&mut Predictor)) {
         act(self.predictors.lock().expect("predictors").entry(block.to_owned()).or_default());
     }
+    /// For reading and answering a program's question, in any session on this box.
+    pub fn asker(&self) -> crate::Asker {
+        crate::Asker(self.input.sender())
+    }
+
     /// Take this pane's size, on the person's explicit request: every client viewing it re-wraps.
     pub fn fit_here(&self, session: &str, block: &str) {
         self.send(HostCommand::Claim {
@@ -441,7 +446,7 @@ mod tests {
             assert!(matches!(command, HostCommand::Terminal { command: Command::Scroll(_), .. }));
         }
         let mut methods = Vec::new();
-        while let Ok(Outgoing { method, payload }) = typed.try_recv() {
+        while let Ok(Outgoing { method, payload, .. }) = typed.try_recv() {
             assert_eq!(payload["session_id"], "session:a");
             assert_eq!(payload["block_id"], "block:1");
             methods.push(method);

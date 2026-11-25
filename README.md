@@ -13,6 +13,6 @@ The backend is [rex-rune](https://github.com/shuv1337/rex-rune) (MIT, Copyright 
 Pop!_OS 24.04: Rust 1.96+, Zig 0.17.1 on `PATH`, and `sudo apt install libxkbcommon-dev`.
 
     cargo run --release                # your saved boxes
-    cargo run --release -- --demo      # no server needed
+    cargo run --release -- --demo      # no server needed (--stress times drawing)
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/design](docs/design).

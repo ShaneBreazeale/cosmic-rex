@@ -12,7 +12,8 @@ use cosmic::{
 use futures_util::StreamExt as _;
 use grid::{Action, Cache, Grid, Identity, Metrics, Shortcut};
 use rex_backend::{
-    Agent, AgentState, BoxConfig, Boxes, Host, PaneView, Snapshot, Split, Wake, demo::Demo,
+    Agent, AgentState, AnswerKey, BoxConfig, Boxes, Host, Outcome, PaneView, Question, Reply, Snapshot, Split, Wake,
+    demo::Demo,
 };
 use std::{
     hash::{Hash, Hasher},
@@ -35,12 +36,18 @@ struct Args {
     /// Draw local synthetic terminals; connects to nothing
     #[arg(long)]
     demo: bool,
-    /// Exit after this many seconds (with --demo, print draw statistics)
+    /// With --demo: flood a pane with changing colours at 60 updates a second, to time drawing
+    #[arg(long, requires = "demo")]
+    stress: bool,
+    /// Exit after this many seconds (with --stress, print draw statistics)
     #[arg(long)]
     bench: Option<u64>,
     /// Wait for the server to echo typing instead of showing it at once
     #[arg(long)]
     no_local_echo: bool,
+    /// With --demo: open an answer sheet
+    #[arg(long, requires = "demo")]
+    ask: bool,
     /// Start with the sidebar and inbox closed
     #[arg(long)]
     quiet: bool,
@@ -83,6 +90,14 @@ enum Message {
     AskRemove(String),
     Remove(String),
     Fit(String, String, String),
+    Ask(String, Box<Agent>),
+    Asked(u64, Result<Question, String>),
+    AnswerArmed(u64),
+    AnswerDraft(String),
+    AnswerKey(AnswerKey),
+    AnswerLine,
+    Answered(u64, Outcome),
+    OpenAsked,
     Connect(String),
     Disconnect(String),
     DemoTick,
@@ -101,6 +116,20 @@ enum Dialog {
     Add { label: String, address: String, error: Option<String> },
     Remove(BoxConfig),
     Fit { config: BoxConfig, session: String, block: String },
+    Answer(Box<Answer>),
+}
+
+/// An open answer sheet. Results carry its number, so a late one can't land in another sheet.
+struct Answer {
+    number: u64,
+    config: BoxConfig,
+    agent: Agent,
+    question: Option<Result<Question, String>>,
+    /// The question has been readable for a moment.
+    armed: bool,
+    reply: String,
+    sending: bool,
+    outcome: Option<String>,
 }
 
 struct App {
@@ -119,10 +148,34 @@ struct App {
     cache: Cache,
     metrics: Metrics,
     title: String,
+    /// Answer sheets opened so far.
+    sheets: u64,
     started: Instant,
 }
 
 impl App {
+    fn sheet(&mut self) -> Option<&mut Answer> {
+        match &mut self.dialog {
+            Some(Dialog::Answer(a)) => Some(a),
+            _ => None,
+        }
+    }
+
+    fn send_answer(&mut self, reply: Reply) -> Task<Message> {
+        let Some(a) = self.sheet().filter(|a| a.armed && !a.sending && a.outcome.is_none()) else {
+            return Task::none();
+        };
+        let Some(Ok(question)) = &a.question else { return Task::none() };
+        let (number, ticket, id) = (a.number, question.ticket.clone(), a.config.id.clone());
+        a.sending = true;
+        let Some(asker) = self.boxes.host(&id).map(Host::asker) else {
+            return self.update(Message::Answered(number, Outcome::NotSent("The box is disconnected".into())));
+        };
+        Task::perform(asker.answer(ticket, reply), move |o| {
+            cosmic::Action::App(Message::Answered(number, o))
+        })
+    }
+
     fn snapshot(&self, id: &str) -> Option<&Snapshot> {
         self.now.iter().find(|(b, _)| b == id).map(|(_, s)| s)
     }
@@ -311,6 +364,7 @@ impl Application for App {
             problem,
             cache: Cache::default(),
             title: String::new(),
+            sheets: 0,
             started: Instant::now(),
             core,
             args,
@@ -320,7 +374,12 @@ impl Application for App {
         if app.args.quiet && !app.args.demo {
             app.core.nav_bar_set_toggled(false);
         }
-        let task = app.refresh();
+        let mut task = app.refresh();
+        if app.args.ask
+            && let Some((id, agent)) = app.inbox().first().map(|(c, _, a)| (c.id.clone(), (*a).clone()))
+        {
+            task = app.update(Message::Ask(id, Box::new(agent)));
+        }
         (app, task)
     }
 
@@ -407,6 +466,14 @@ impl Application for App {
                     .secondary_action(cancel())
                     .into()
             }
+            Dialog::Answer(a) => ui::answer(ui::Sheet {
+                config: &a.config,
+                agent: &a.agent,
+                question: a.question.as_ref().map(|q| q.as_ref().map_err(String::as_str)),
+                reply: &a.reply,
+                outcome: a.outcome.as_deref().or(a.sending.then_some("Sending…")),
+                armed: a.armed && !a.sending && a.outcome.is_none(),
+            }),
             Dialog::Remove(config) => widget::dialog()
                 .title(format!("Remove {}?", config.label))
                 .body("It is only forgotten here. Everything running on it keeps running.")
@@ -455,7 +522,7 @@ impl Application for App {
                     .map(|(id, _)| Message::Wake(id)),
             );
         }
-        if self.demo.is_some() {
+        if self.args.stress {
             all.push(cosmic::iced::time::every(Duration::from_millis(16)).map(|_| Message::DemoTick));
         }
         if let Some(seconds) = self.args.bench {
@@ -606,6 +673,78 @@ impl Application for App {
                     host.fit_here(&session, &block);
                 }
             }
+            Message::Ask(id, agent) => {
+                let Some(config) = self.boxes.config(&id).cloned() else { return Task::none() };
+                self.sheets += 1;
+                let number = self.sheets;
+                let target = (agent.session.clone(), agent.block.clone());
+                let demo = self.demo.as_ref().map(|_| rex_backend::demo::question(&agent));
+                self.dialog = Some(Dialog::Answer(Box::new(Answer {
+                    number,
+                    config,
+                    agent: *agent,
+                    question: None,
+                    armed: false,
+                    reply: String::new(),
+                    sending: false,
+                    outcome: None,
+                })));
+                if let Some(question) = demo {
+                    return self.update(Message::Asked(number, Ok(question)));
+                }
+                let Some(asker) = self.boxes.host(&id).map(Host::asker) else {
+                    return self.update(Message::Asked(number, Err("The box is disconnected".into())));
+                };
+                return Task::perform(asker.question(target.0, target.1), move |q| {
+                    cosmic::Action::App(Message::Asked(number, q))
+                });
+            }
+            Message::Asked(number, question) => {
+                if let Some(a) = self.sheet().filter(|a| a.number == number) {
+                    a.question = Some(question);
+                    // Long enough that a key or click meant for something else can't land here.
+                    return Task::perform(rex_backend::pause(Duration::from_millis(300)), move |()| {
+                        cosmic::Action::App(Message::AnswerArmed(number))
+                    });
+                }
+            }
+            Message::AnswerArmed(number) => {
+                if let Some(a) = self.sheet().filter(|a| a.number == number) {
+                    a.armed = true;
+                }
+            }
+            Message::AnswerDraft(text) => {
+                if let Some(a) = self.sheet() {
+                    a.reply = text;
+                }
+            }
+            Message::AnswerKey(key) => return self.send_answer(Reply::Key(key)),
+            Message::AnswerLine => {
+                if let Some(line) = self.sheet().map(|a| a.reply.clone()).filter(|r| !r.trim().is_empty()) {
+                    return self.send_answer(Reply::Line(line));
+                }
+            }
+            Message::Answered(number, outcome) => {
+                if let Some(a) = self.sheet().filter(|a| a.number == number) {
+                    a.sending = false;
+                    a.outcome = Some(match outcome {
+                        Outcome::Reacted => "Sent, and the program moved on.".into(),
+                        Outcome::Unconfirmed => {
+                            "Sent, but the program has not reacted. Open the terminal to check.".into()
+                        }
+                        Outcome::Changed => "The question changed. Nothing was sent.".into(),
+                        Outcome::NotSent(why) => format!("Nothing was sent: {why}"),
+                        Outcome::Unknown => {
+                            "The connection failed while sending. Open the terminal to check; nothing is sent again.".into()
+                        }
+                    });
+                }
+            }
+            Message::OpenAsked => {
+                if let Some(Dialog::Answer(a)) = self.dialog.take() {
+                    return self.update(Message::OpenAgent(a.config.id, a.agent.session, a.agent.window));
+                }
+            }
             Message::Connect(id) => {
                 match self.boxes.host(&id) {
                     Some(host) => host.reconnect(),
@@ -623,7 +762,7 @@ impl Application for App {
                 }
             }
             Message::BenchDone => {
-                if let Some(demo) = &self.demo {
+                if let Some(demo) = self.demo.as_ref().filter(|_| self.args.stress) {
                     demo.report(self.started.elapsed(), self.cache.shaped.get());
                 }
                 match (self.args.screenshot.is_some(), self.core.main_window_id()) {
