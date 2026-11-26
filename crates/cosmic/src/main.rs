@@ -24,6 +24,10 @@ use std::{
 
 /// How long a confirmed tab close hides the tab while the server drops it. If it is still there
 /// after this, it shows again as it is.
+/// The terminal font sizes allowed, and one step of the View menu's.
+const FONT_MIN: f32 = 6.0;
+const FONT_MAX: f32 = 72.0;
+const FONT_STEP: f32 = 1.0;
 const CLOSE_WAIT: Duration = Duration::from_secs(5);
 
 #[derive(clap::Parser, Clone)]
@@ -69,7 +73,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     use clap::Parser as _;
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     let args = Args::parse();
-    if !args.font_size.is_finite() || !(6.0..=72.0).contains(&args.font_size) {
+    if !args.font_size.is_finite() || !(FONT_MIN..=FONT_MAX).contains(&args.font_size) {
         return Err("--font-size must be between 6 and 72".into());
     }
     rex_backend::init();
@@ -97,6 +101,7 @@ enum Message {
     LeaveTab(String),
     TabCommand(ui::TabCommand),
     PaneCommand(ui::PaneCommand),
+    View(ui::ViewCommand),
     AskCloseTab(String),
     CloseTab { id: String, session: String, window: String },
     ClosePane { id: String, session: String, block: String },
@@ -193,6 +198,8 @@ struct App {
     demo: Option<Demo>,
     cache: Cache,
     metrics: Metrics,
+    /// The terminal font size asked for: `--font-size` until the View menu changes it.
+    font_size: f32,
     title: String,
     /// Answer sheets and close questions opened so far.
     sheets: u64,
@@ -376,8 +383,12 @@ impl App {
 
     /// On `pane` if given, else on the pane with the keyboard.
     fn shortcut_on(&mut self, shortcut: Shortcut, pane: Option<&str>) -> Task<Message> {
-        if shortcut == Shortcut::Agents {
-            return self.update(Message::ToggleInbox);
+        match shortcut {
+            Shortcut::Agents => return self.update(Message::ToggleInbox),
+            Shortcut::FontBigger => return self.update(Message::View(ui::ViewCommand::Bigger)),
+            Shortcut::FontSmaller => return self.update(Message::View(ui::ViewCommand::Smaller)),
+            Shortcut::FontReset => return self.update(Message::View(ui::ViewCommand::Reset)),
+            _ => {}
         }
         let Some((config, now)) = self.here() else { return Task::none() };
         let (Some(host), Some(session), Some(block)) =
@@ -419,7 +430,7 @@ impl App {
             Shortcut::NewTab => host.new_tab(session, block),
             Shortcut::SplitRight => host.split(session, block, Split::Right),
             Shortcut::SplitDown => host.split(session, block, Split::Down),
-            Shortcut::Agents => {}
+            Shortcut::Agents | Shortcut::FontBigger | Shortcut::FontSmaller | Shortcut::FontReset => {}
         }
         Task::none()
     }
@@ -488,6 +499,7 @@ impl Application for App {
         }
         let mut app = Self {
             metrics: Metrics::measure(args.font_size, 1.0),
+            font_size: args.font_size,
             demo: args.demo.then(Demo::new),
             nav: nav_bar::Model::default(),
             boxes,
@@ -544,9 +556,15 @@ impl Application for App {
 
     // In the start slot: text in libcosmic's centre slot, which is laid out twice, isn't drawn.
     fn header_start(&self) -> Vec<Element<'_, Message>> {
-        let Some((config, now)) = self.here() else { return Vec::new() };
+        let view = ui::view_menu(ui::ViewMenu {
+            bigger: self.font_size < FONT_MAX,
+            smaller: self.font_size > FONT_MIN,
+            reset: self.font_size != self.args.font_size,
+        });
+        let Some((config, now)) = self.here() else { return vec![view] };
         let session = now.sessions.iter().find(|s| Some(&s.id) == now.session.as_ref());
         let mut out = vec![
+            view,
             widget::space::horizontal().width(8).into(),
             ui::monogram(config),
             widget::space::horizontal().width(4).into(),
@@ -860,6 +878,18 @@ impl Application for App {
                             self.dialog = Some(Dialog::Rename { config, session, window, label });
                         }
                     }
+                }
+            }
+            Message::View(command) => {
+                let size = match command {
+                    ui::ViewCommand::Bigger => self.font_size + FONT_STEP,
+                    ui::ViewCommand::Smaller => self.font_size - FONT_STEP,
+                    ui::ViewCommand::Reset => self.args.font_size,
+                }
+                .clamp(FONT_MIN, FONT_MAX);
+                if size != self.font_size {
+                    self.font_size = size;
+                    self.metrics = Metrics::measure(size, self.metrics.scale);
                 }
             }
             Message::PaneCommand(command) => {
@@ -1183,7 +1213,7 @@ impl Application for App {
                 // COSMIC's own interface scale multiplies the compositor's.
                 let scale = f * self.core.scale_factor();
                 if (scale - self.metrics.scale).abs() > 1e-3 {
-                    self.metrics = Metrics::measure(self.args.font_size, scale);
+                    self.metrics = Metrics::measure(self.font_size, scale);
                 }
             }
             Message::DemoTick => {

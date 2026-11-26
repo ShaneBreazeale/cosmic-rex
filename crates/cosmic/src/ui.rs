@@ -731,3 +731,58 @@ pub fn pane_menu(p: PaneMenu) -> Vec<widget::menu::Tree<Message>> {
         ],
     )
 }
+
+/// The title bar's View menu: the terminal font, as Rex's own clients have it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ViewCommand {
+    Bigger,
+    Smaller,
+    Reset,
+}
+
+impl widget::menu::Action for ViewCommand {
+    type Message = Message;
+    fn message(&self) -> Message {
+        Message::View(*self)
+    }
+}
+
+/// What the View menu can do from the size shown now.
+pub struct ViewMenu {
+    pub bigger: bool,
+    pub smaller: bool,
+    /// The size is not the one the app started with.
+    pub reset: bool,
+}
+
+pub fn view_menu<'a>(v: ViewMenu) -> Element<'a, Message> {
+    use widget::menu::{Item, KeyBind, Tree, key_bind::Modifier};
+    let when = |can: bool, label, command| {
+        if can { Item::Button(label, None, command) } else { Item::ButtonDisabled(label, None, command) }
+    };
+    let ctrl = |key: &str| KeyBind {
+        modifiers: vec![Modifier::Ctrl],
+        key: cosmic::iced::keyboard::Key::Character(key.into()),
+    };
+    let binds = std::collections::HashMap::from([
+        (ctrl("0"), ViewCommand::Reset),
+        (ctrl("="), ViewCommand::Bigger),
+        (ctrl("-"), ViewCommand::Smaller),
+    ]);
+    let items = widget::menu::items(
+        &binds,
+        vec![
+            when(v.reset, "Reset font size", ViewCommand::Reset),
+            when(v.bigger, "Increase font size", ViewCommand::Bigger),
+            when(v.smaller, "Decrease font size", ViewCommand::Smaller),
+        ],
+    );
+    widget::menu::bar(vec![Tree::with_children(
+        widget::RcElementWrapper::new(Element::from(widget::menu::root("View"))),
+        items,
+    )])
+    .item_height(widget::menu::ItemHeight::Dynamic(40))
+    .item_width(widget::menu::ItemWidth::Uniform(260))
+    .spacing(4.0)
+    .into()
+}

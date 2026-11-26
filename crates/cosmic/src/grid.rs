@@ -35,6 +35,9 @@ const GAP: f32 = 12.0;
 /// One header button, and the order they sit in.
 const BUTTON: f32 = 26.0;
 const BUTTONS: [Shortcut; 4] = [Shortcut::SplitRight, Shortcut::SplitDown, Shortcut::Zoom, Shortcut::ClosePane];
+/// How long a pane may be down before it is drawn as paused. Panes coming into view, as when a
+/// tab closes and the next one shows, connect within this, and so never flash as paused.
+const PAUSE_GRACE: Duration = Duration::from_millis(1200);
 /// Presses closer together than this, on the same cell, count as a double or triple click.
 const MULTI_CLICK: Duration = Duration::from_millis(400);
 
@@ -265,18 +268,6 @@ fn color(rgb: u32) -> Color {
     Color::from_rgb8(r, g, b)
 }
 
-/// A terminal's own background, unless it is the default near-black on a dark desktop: that one
-/// becomes the raised surface, so panes read as cards. Other grounds are left as they are.
-fn ground(bg: u32, theme: &Theme) -> Color {
-    let (r, g, b) = bytes(bg);
-    let c = theme.cosmic();
-    if c.is_dark && u32::from(r) + u32::from(g) + u32::from(b) < 3 * 24 {
-        c.primary_container_color().into()
-    } else {
-        color(bg)
-    }
-}
-
 /// The header buttons' icons, as vectors: drawn at the display's own scale, and the same on
 /// every machine, which theme icons are not.
 fn icon(s: Shortcut, zoomed: bool) -> &'static svg::Handle {
@@ -346,6 +337,9 @@ pub enum Shortcut {
     ClosePane,
     Agents,
     Fit,
+    FontBigger,
+    FontSmaller,
+    FontReset,
 }
 
 /// What holds for the tab on screen as a whole.
@@ -538,6 +532,8 @@ struct State {
     middle: Option<(String, (u16, u16))>,
     /// The last left press, for counting double and triple clicks.
     click: Option<(Instant, String, (u16, u16), u32)>,
+    /// Since when each pane on screen has not been live.
+    down_since: HashMap<String, Instant>,
     /// The pane under the pointer and the header button, if any, as last drawn.
     hover: Option<(String, Option<Shortcut>)>,
 }
@@ -580,6 +576,14 @@ impl<M> Widget<M, Theme, Renderer> for Grid<'_, M> {
             sizes.insert(pane.block.clone(), grid);
         }
         state.sizes = sizes;
+        let now = Instant::now();
+        state.down_since.retain(|b, _| self.panes.iter().any(|p| &p.block == b && !p.live));
+        for pane in self.panes.iter().filter(|p| !p.live) {
+            let since = *state.down_since.entry(pane.block.clone()).or_insert(now);
+            if now < since + PAUSE_GRACE {
+                shell.request_redraw_at(since + PAUSE_GRACE);
+            }
+        }
 
         match event {
             Event::Keyboard(keyboard::Event::ModifiersChanged(m)) => state.modifiers = *m,
@@ -784,13 +788,15 @@ impl<M> Widget<M, Theme, Renderer> for Grid<'_, M> {
     ) {
         let bounds = layout.bounds();
         // What `update` last found under the pointer, the same state that asked for this frame.
-        let over = &tree.state.downcast_ref::<State>().hover;
+        let state = tree.state.downcast_ref::<State>();
+        let over = &state.hover;
         for pane in &self.panes {
             let rect = self.rect(pane, bounds);
             let Some(clip) = rect.intersection(viewport) else { continue };
             let hover = over.as_ref().filter(|(b, _)| *b == pane.block).map(|(_, s)| *s);
             // A layer per pane keeps a wider server-sized grid from spilling into neighbours.
-            renderer.with_layer(clip, |r| self.draw_pane(r, pane, rect, clip, theme, hover));
+            let paused = !pane.live && state.down_since.get(&pane.block).is_some_and(|t| t.elapsed() >= PAUSE_GRACE);
+            renderer.with_layer(clip, |r| self.draw_pane(r, pane, rect, clip, theme, hover, paused));
         }
     }
 }
@@ -806,6 +812,8 @@ impl<M> Grid<'_, M> {
         theme: &Theme,
         // Over this pane, and over which of its buttons.
         hover: Option<Option<Shortcut>>,
+        // Down for longer than a reconnect takes.
+        paused: bool,
     ) {
         let m = self.pane_metrics(pane, rect);
         let c = theme.cosmic();
@@ -843,7 +851,7 @@ impl<M> Grid<'_, M> {
         // One surface: the header sits on the terminal's own background.
         let (ground, ink) = pane.frame.as_ref().map_or_else(
             || (Color::from(c.primary_container_color()), Color::from(c.on_bg_color())),
-            |f| (ground(f.bg(), theme), color(f.fg())),
+            |f| (color(f.bg()), color(f.fg())),
         );
         rounded(r, rect, ground, radius);
         let on = Color { a: if pane.focused { 1.0 } else { 0.62 }, ..ink };
@@ -985,12 +993,15 @@ impl<M> Grid<'_, M> {
                 }
             }
         }
+        // A pane being closed only dims: its program has ended, and words would flash.
         let closing = self.tab.closing || self.tab.closing_panes.contains(&pane.block);
-        if closing || !pane.live {
+        if closing {
+            rounded(r, body, Color { a: 0.45, ..Color::from(c.bg_color()) }, lower);
+        } else if paused {
             rounded(r, body, Color { a: 0.45, ..Color::from(c.bg_color()) }, lower);
             // Pattern and words, not just colour: this screen is only the last one seen.
             let mut y = body.y + 12.0;
-            while !closing && y < body.y + body.height {
+            while y < body.y + body.height {
                 fill(r, Rectangle { y, height: 1.0, ..body }, Color { a: 0.25, ..on });
                 y += 12.0;
             }
@@ -1004,12 +1015,7 @@ impl<M> Grid<'_, M> {
             use cosmic::iced::advanced::text::{self, Renderer as _};
             r.fill_text(
                 text::Text {
-                    content: match (self.tab.closing, closing) {
-                        (true, _) => "Closing tab…",
-                        (false, true) => "Closing pane…",
-                        _ => "Paused · last screen seen · keys are not sent",
-                    }
-                        .to_owned(),
+                    content: "Paused · last screen seen · keys are not sent".to_owned(),
                     bounds: plate.size(),
                     size: 12.0.into(),
                     line_height: text::LineHeight::default(),
@@ -1037,10 +1043,23 @@ impl<'a, M: 'a> From<Grid<'a, M>> for cosmic::Element<'a, M> {
 
 fn shortcut(key: &keyboard::key::Physical, m: keyboard::Modifiers) -> Option<Shortcut> {
     use keyboard::key::{Code, Physical};
-    if !(m.control() && m.shift()) || m.alt() || m.logo() {
+    let Physical::Code(code) = key else { return None };
+    if m.alt() || m.logo() || !m.control() {
         return None;
     }
-    let Physical::Code(code) = key else { return None };
+    // Ctrl with or without Shift, as in other terminals: Ctrl+= and Ctrl++ are one key.
+    let font = match code {
+        Code::Equal | Code::NumpadAdd => Some(Shortcut::FontBigger),
+        Code::Minus | Code::NumpadSubtract => Some(Shortcut::FontSmaller),
+        Code::Digit0 | Code::Numpad0 => Some(Shortcut::FontReset),
+        _ => None,
+    };
+    if font.is_some() {
+        return font;
+    }
+    if !m.shift() {
+        return None;
+    }
     Some(match code {
         Code::KeyC => Shortcut::Copy,
         Code::KeyV => Shortcut::Paste,
@@ -1058,6 +1077,20 @@ fn shortcut(key: &keyboard::key::Physical, m: keyboard::Modifiers) -> Option<Sho
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn font_keys_take_ctrl_with_or_without_shift() {
+        use keyboard::key::{Code, Physical};
+        let (ctrl, shift) = (keyboard::Modifiers::CTRL, keyboard::Modifiers::CTRL | keyboard::Modifiers::SHIFT);
+        let at = |c, m| shortcut(&Physical::Code(c), m);
+        assert_eq!(at(Code::Equal, ctrl), Some(Shortcut::FontBigger));
+        assert_eq!(at(Code::Equal, shift), Some(Shortcut::FontBigger));
+        assert_eq!(at(Code::Minus, ctrl), Some(Shortcut::FontSmaller));
+        assert_eq!(at(Code::Digit0, ctrl), Some(Shortcut::FontReset));
+        // The rest stay Ctrl+Shift, so Ctrl+D and friends still reach the program.
+        assert_eq!(at(Code::KeyD, ctrl), None);
+        assert_eq!(at(Code::Minus, keyboard::Modifiers::empty()), None);
+    }
 
     #[test]
     fn a_long_run_stays_on_the_cell_grid() {
