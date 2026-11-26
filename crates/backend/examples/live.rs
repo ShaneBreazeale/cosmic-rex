@@ -3,7 +3,7 @@
 //! Creates one throwaway session, uses only that, and destroys it at the end whatever happens.
 //! A second client stands in for the Mac app. Prints nothing about any other session.
 use rex_backend::{
-    AgentState, AnswerKey, Host, Key, KeyAction, Outcome, Reply, Size, Snapshot, WaitingFor,
+    AgentState, AnswerKey, Host, Key, KeyAction, Outcome, Pointer, Reply, Select, Size, Snapshot, WaitingFor,
 };
 use rex_rune::connection::{HostCommand, HostConnection, HumanClose};
 use std::{
@@ -253,6 +253,7 @@ fn checks(mac: &HostConnection, host: &Host, block: &str, session: &str) -> Chec
     println!("      snapshot: {:.1} us each", t.elapsed().as_secs_f64() * 1000.0);
     println!("      burst lag, owned here:      {} ms ({} ms without releases)", burst(host, block, true)?, burst(host, block, false)?);
 
+    selecting(host, block)?;
     answers(host, block, session)?;
 
     // "Run the live test?" as a blocked permission request, from a process of its own.
@@ -276,8 +277,54 @@ fn checks(mac: &HostConnection, host: &Host, block: &str, session: &str) -> Chec
     tabs(host, block, session)
 }
 
+/// A line chosen with a triple click and the whole screen with Select all, then the screen cleared.
+fn selecting(host: &Host, block: &str) -> Check {
+    run(host, block, "clear; echo pick-$((6*7))-this-line");
+    let row = until("the line to pick", 15, || {
+        screen(&host.snapshot()).lines().position(|l| l == "pick-42-this-line")
+    })?;
+    let at = |x: u16| Pointer { cell: (x, row as u16), position: (f32::from(x) * 8.0 + 2.0, row as f32 * 18.0 + 4.0), cell_width: 8.0, height: 400.0 };
+    let text = |revision: u64| {
+        until("the selection's text", 10, || {
+            let s = host.snapshot();
+            let f = s.panes.first()?.frame.clone()?;
+            (f.selection_revision() >= revision).then(|| f.selected_text().unwrap_or_default().to_owned())
+        })
+    };
+    host.selection(block, Select::Press(3), at(4)).ok_or("no selection")?;
+    let up = host.selection(block, Select::Release, at(4)).ok_or("no release")?;
+    ensure(text(up)? == "pick-42-this-line", "a triple click selects the line, and its text is there to copy")?;
+    let press = host.selection(block, Select::Press(1), at(2)).ok_or("no press")?;
+    ensure(text(press)?.is_empty(), "a single click clears it and selects nothing")?;
+    host.selection(block, Select::Press(1), at(5)).ok_or("no press")?;
+    host.selection(block, Select::Drag, at(9)).ok_or("no drag")?;
+    let up = host.selection(block, Select::Release, at(9)).ok_or("no release")?;
+    let got = text(up)?;
+    ensure(got == "42-t", &format!("dragging selects up to the cell edge the pointer passed (got {got:?})"))?;
+    let all = host.selection(block, Select::All, at(0)).ok_or("no select all")?;
+    ensure(text(all)?.contains("pick-42-this-line"), "Select all takes the whole screen")?;
+    host.clear(block);
+    until("the screen to clear", 15, || (!screen(&host.snapshot()).contains("pick-42")).then_some(()))?;
+    pass("Clear empties the screen and scrollback");
+    Ok(())
+}
+
 /// A second tab in the throwaway session: renamed, then closed, leaving the first one as it was.
 fn tabs(host: &Host, block: &str, session: &str) -> Check {
+    host.split(session, block, rex_backend::Split::Right);
+    let new = until("the split", 15, || {
+        let s = host.snapshot();
+        (s.tab_panes == 2).then(|| s.panes.into_iter().find(|p| p.block != block)).flatten()
+    })?;
+    host.zoom(session, &new.block);
+    until("the zoom", 15, || host.snapshot().panes.iter().any(|p| p.block == new.block && p.zoomed).then_some(()))?;
+    pass("a zoomed pane says so, with its tab's other pane still counted");
+    host.close_pane(session, &new.block);
+    until("the pane to close", 15, || {
+        let s = host.snapshot();
+        (s.tab_panes == 1 && s.panes.iter().all(|p| p.block == block)).then_some(())
+    })?;
+    pass("closing a pane closes only that pane");
     let first = host.snapshot().tabs;
     ensure(first.len() == 1, "the throwaway session starts with one tab")?;
     host.new_tab(session, block);

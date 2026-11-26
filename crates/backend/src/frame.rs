@@ -103,6 +103,19 @@ impl Frame {
             core::CursorShape::Hollow => CursorShape::Hollow,
         }
     }
+    /// The selection's text, unwrapped and trimmed, if anything is selected. Terminal text:
+    /// for the clipboard only, never shown as a label.
+    pub fn selected_text(&self) -> Option<&str> {
+        self.0.selection_text.as_deref().filter(|t| !t.is_empty())
+    }
+    /// Why the selection could not be copied (it is over the copy limit), if it could not.
+    pub fn selection_error(&self) -> Option<&str> {
+        self.0.selection_error.as_deref()
+    }
+    /// The last selection gesture this frame has applied; see [`crate::Host::selection`].
+    pub fn selection_revision(&self) -> u64 {
+        self.0.selection_revision
+    }
     pub fn mouse_tracking(&self) -> bool {
         self.0.mouse_tracking
     }

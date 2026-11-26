@@ -18,7 +18,7 @@ Input: typing has its own control connection per box (`crates/backend/src/input.
 
 Live check: `cargo run --release -p rex-backend --example live -- ENDPOINT` (one throwaway session, removed afterwards).
 
-Safety: attaching never creates, stops or destroys anything. Status text is stripped and bounded in the backend and shown only as plain text. Remote-control requests from other clients are refused. Typing never takes a pane's size from another client (`Host::type_into`); taking it is an explicit, confirmed act. Input to a pane that is not live is dropped, never queued. Pasting is bound to the box and pane that was focused when it was requested.
+Safety: attaching never creates, stops or destroys anything. Status text is stripped and bounded in the backend and shown only as plain text. Remote-control requests from other clients are refused. Typing never takes a pane's size from another client (`Host::type_into`); taking it is an explicit, confirmed act. Input to a pane that is not live is dropped, never queued. Pasting is bound to the box and pane that was focused when it was requested. Selecting is this client's own, made on its copy of the screen (`Host::selection`): nothing reaches the server or the program. Mouse presses, drags and the wheel go to a program only when it asked for mouse reports and Shift is not held; only a press asks for an unclaimed pane's size, as typing does. Clear (`Host::clear`) empties a live pane's screen and scrollback for every device and takes no size.
 
 Licences: this repo and rex-rune are MIT; libcosmic is MPL-2.0 (used as a dependency). cosmic-term is GPL-3.0: its code must not be copied here.
 

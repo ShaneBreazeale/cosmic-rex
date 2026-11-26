@@ -100,6 +100,7 @@ impl Demo {
                 size: [crate::Size::Elsewhere, crate::Size::Here][i],
                 live: true,
                 guess: String::new(),
+                zoomed: false,
                 state: [crate::AgentState::Blocked, crate::AgentState::Working][i],
             })
             .collect()
@@ -160,6 +161,7 @@ pub fn sample() -> (Vec<crate::BoxConfig>, Vec<(String, crate::Snapshot)>) {
         session: Some("api-refactor".into()),
         tabs: vec![tab("tests"), tab("server"), tab("shell")],
         tab: Some("tests".into()),
+        tab_panes: 2,
         agents: vec![
             agent("api-refactor", "tests", S::Blocked, Some(WaitingFor::Permission), "claude-code", "Run cargo test --workspace?"),
             agent("billing-migration", "run", S::Working, None, "codex", "Updating the invoice schema"),

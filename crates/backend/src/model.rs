@@ -98,11 +98,15 @@ pub struct PaneView {
     pub state: AgentState,
     /// Typed but not yet echoed, to draw from the cursor on. Local echo; may be wrong.
     pub guess: String,
+    /// It fills the tab while the tab's other panes wait behind it.
+    pub zoomed: bool,
 }
 
 #[derive(Clone, Default)]
 pub struct Snapshot {
     pub connected: bool,
+    /// Panes in the tab on screen, shown or hidden behind a zoomed one.
+    pub tab_panes: usize,
     pub status: String,
     pub notice: Option<String>,
     pub sessions: Vec<Session>,
@@ -144,6 +148,7 @@ impl Snapshot {
         let panes = window.map_or_else(Vec::new, |w| layout::placements(w, None).0);
         Self {
             connected: m.connected,
+            tab_panes: window.map_or(0, |w| w.layers.iter().flat_map(|l| &l.blocks).count()),
             status: plain(&m.status, 300),
             notice: m.notice.as_deref().map(|n| plain(n, 300)),
             sessions,
@@ -182,6 +187,7 @@ impl Snapshot {
                             .unwrap_or_default(),
                         live,
                         guess: String::new(),
+                        zoomed: window.is_some_and(|w| layout::is_zoomed(w, &p.block)),
                         block: p.block,
                         rect: p.rect,
                         frame,
@@ -382,6 +388,8 @@ mod tests {
             ]
         );
         assert_eq!(s.focused(), Some("block:2"));
+        assert_eq!(s.tab_panes, 2);
+        assert!(s.panes.iter().all(|p| !p.zoomed));
         assert_eq!(s.tab.as_deref(), Some("window:1"));
     }
 

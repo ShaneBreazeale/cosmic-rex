@@ -663,3 +663,71 @@ pub fn answer<'a>(s: Sheet<'a>) -> Element<'a, Message> {
         .width(620)
         .into()
 }
+
+/// What a pane's right-click menu can do. It acts on the pane the right button went down on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PaneCommand {
+    Copy,
+    Paste,
+    SelectAll,
+    Clear,
+    SplitRight,
+    SplitDown,
+    Zoom,
+    ClosePane,
+    CloseTab,
+}
+
+impl widget::menu::Action for PaneCommand {
+    type Message = Message;
+    fn message(&self) -> Message {
+        Message::PaneCommand(*self)
+    }
+}
+
+/// What the pane a menu is for allows.
+pub struct PaneMenu {
+    pub selected: bool,
+    pub live: bool,
+    pub zoomed: bool,
+    pub can_zoom: bool,
+    /// It is not the session's only pane.
+    pub can_close: bool,
+}
+
+/// The pane menu, as most Linux terminals have it. Copy needs a selection; what reaches the
+/// program or the server needs a live pane.
+pub fn pane_menu(p: PaneMenu) -> Vec<widget::menu::Tree<Message>> {
+    let PaneMenu { selected, live, zoomed, can_zoom, can_close } = p;
+    use widget::menu::{Item, KeyBind, key_bind::Modifier};
+    let when = |can: bool, label, command| {
+        if can { Item::Button(label, None, command) } else { Item::ButtonDisabled(label, None, command) }
+    };
+    let keys = |key: &str| KeyBind {
+        modifiers: vec![Modifier::Ctrl, Modifier::Shift],
+        key: cosmic::iced::keyboard::Key::Character(key.into()),
+    };
+    let binds = std::collections::HashMap::from([
+        (keys("c"), PaneCommand::Copy),
+        (keys("v"), PaneCommand::Paste),
+        (keys("d"), PaneCommand::SplitRight),
+        (keys("e"), PaneCommand::SplitDown),
+        (keys("w"), PaneCommand::ClosePane),
+    ]);
+    widget::menu::items(
+        &binds,
+        vec![
+            when(selected, "Copy", PaneCommand::Copy),
+            when(live, "Paste", PaneCommand::Paste),
+            Item::Button("Select all", None, PaneCommand::SelectAll),
+            when(live, "Clear", PaneCommand::Clear),
+            Item::Divider,
+            Item::Button("Split right", None, PaneCommand::SplitRight),
+            Item::Button("Split down", None, PaneCommand::SplitDown),
+            when(can_zoom, if zoomed { "Restore" } else { "Zoom" }, PaneCommand::Zoom),
+            Item::Divider,
+            when(can_close, "Close pane…", PaneCommand::ClosePane),
+            Item::Button("Close tab…", None, PaneCommand::CloseTab),
+        ],
+    )
+}

@@ -12,7 +12,7 @@ use cosmic::{
     widget::{self, nav_bar},
 };
 use futures_util::StreamExt as _;
-use grid::{Action, Cache, Grid, Identity, Metrics, Shortcut};
+use grid::{Action, Cache, Grid, Identity, Metrics, Shortcut, Tab};
 use rex_backend::{
     Agent, AgentState, AnswerKey, BoxConfig, Boxes, Host, Outcome, PaneView, Question, Reply, Snapshot, Split, Wake,
     demo::Demo,
@@ -21,6 +21,10 @@ use std::{
     hash::{Hash, Hasher},
     time::{Duration, Instant},
 };
+
+/// How long a confirmed tab close hides the tab while the server drops it. If it is still there
+/// after this, it shows again as it is.
+const CLOSE_WAIT: Duration = Duration::from_secs(5);
 
 #[derive(clap::Parser, Clone)]
 #[command(version, about = "Rex for COSMIC (unofficial)")]
@@ -92,8 +96,10 @@ enum Message {
     /// The pointer left this tab. Clears only this one: entering the next may come first.
     LeaveTab(String),
     TabCommand(ui::TabCommand),
+    PaneCommand(ui::PaneCommand),
     AskCloseTab(String),
     CloseTab { id: String, session: String, window: String },
+    ClosePane { id: String, session: String, block: String },
     RenameDraft(String),
     RenameTab,
     /// The close question has been readable for a moment.
@@ -129,6 +135,8 @@ enum Message {
     Disconnect(String),
     /// Waiting times on screen have moved on.
     Minute,
+    /// The window's screen pixels per layout pixel, from the compositor.
+    Scale(f32),
     DemoTick,
     BenchDone,
     Captured(cosmic::iced::window::Screenshot),
@@ -150,6 +158,8 @@ enum Dialog {
     /// Ends programs, so it asks, and Close stays inert until `armed`.
     CloseTab { config: BoxConfig, session: String, window: String, label: String, number: u64, armed: bool },
     Rename { config: BoxConfig, session: String, window: String, label: String },
+    /// Ends the pane's program, so it asks, and Close stays inert until `armed`.
+    ClosePane { config: BoxConfig, session: String, block: String, label: String, number: u64, armed: bool },
     /// Ends every tab in the session, so it asks, and Close stays inert until `armed`.
     CloseSession { config: BoxConfig, session: String, label: String, tabs: Option<usize>, number: u64, armed: bool },
     RenameSession { config: BoxConfig, session: String, label: String },
@@ -191,6 +201,18 @@ struct App {
     hovered_tab: Option<String>,
     /// The box and session whose right-click menu opened last.
     menu_session: Option<(String, String)>,
+    /// Tabs whose close was confirmed and sent, by box, until the server drops them: their
+    /// programs have ended, so they are not drawn as tabs or as paused screens meanwhile.
+    closing: Vec<(String, String, Instant)>,
+    /// Panes whose close was confirmed and sent, by box, until the server drops them.
+    closing_panes: Vec<(String, String, Instant)>,
+    /// The pane whose right-click menu opened last, on the box on screen.
+    menu_pane: Option<String>,
+    /// A selection just made, by box, pane and revision: its text goes to the primary
+    /// selection once a frame carries it.
+    primary: Option<(String, String, u64)>,
+    /// Why the last copy did not happen.
+    copy_problem: Option<String>,
     started: Instant,
 }
 
@@ -224,8 +246,41 @@ impl App {
         let id = self.current.as_deref()?;
         Some((self.boxes.config(id)?, self.snapshot(id)?))
     }
+    /// A tab of the box on screen whose close is on its way.
+    fn closing(&self, window: &str) -> bool {
+        let Some(id) = self.current.as_deref() else { return false };
+        self.closing.iter().any(|(b, w, sent)| b == id && w == window && sent.elapsed() < CLOSE_WAIT)
+    }
     fn host(&self) -> Option<&Host> {
         self.boxes.host(self.current.as_deref()?)
+    }
+    fn pane(&self, block: &str) -> Option<&PaneView> {
+        self.here()?.1.panes.iter().find(|p| p.block == block)
+    }
+
+    /// Put this pane's selection on the clipboard. Nothing is selected: nothing happens.
+    fn copy(&mut self, block: &str) -> Task<Message> {
+        let Some(frame) = self.pane(block).and_then(|p| p.frame.clone()) else { return Task::none() };
+        self.copy_problem = frame.selection_error().map(|e| format!("Not copied: {e}"));
+        frame.selected_text().map_or_else(Task::none, |text| clipboard::write(text.to_owned()))
+    }
+
+    /// The selection just made, once a frame of it has arrived, as the primary selection.
+    fn offer_primary(&mut self) -> Task<Message> {
+        let Some((id, block, revision)) = self.primary.clone() else { return Task::none() };
+        let Some(frame) = self
+            .snapshot(&id)
+            .and_then(|s| s.panes.iter().find(|p| p.block == block))
+            .and_then(|p| p.frame.clone())
+        else {
+            self.primary = None;
+            return Task::none();
+        };
+        if frame.selection_revision() < revision {
+            return Task::none();
+        }
+        self.primary = None;
+        frame.selected_text().map_or_else(Task::none, |text| clipboard::write_primary(text.to_owned()))
     }
 
     /// Take new snapshots of every box.
@@ -237,6 +292,16 @@ impl App {
         let keep: Vec<String> =
             self.here().map_or_else(Vec::new, |(_, s)| s.panes.iter().map(|p| p.block.clone()).collect());
         self.cache.retain(|block| keep.iter().any(|b| b == block));
+        // Forget a close once the server has dropped the tab, or has had long enough to.
+        let now = &self.now;
+        self.closing.retain(|(id, window, sent)| {
+            sent.elapsed() < CLOSE_WAIT
+                && now.iter().any(|(b, s)| b == id && s.tabs.iter().any(|t| &t.id == window))
+        });
+        self.closing_panes.retain(|(id, block, sent)| {
+            sent.elapsed() < CLOSE_WAIT
+                && now.iter().any(|(b, s)| b == id && s.panes.iter().any(|p| &p.block == block))
+        });
         self.retitle()
     }
 
@@ -321,6 +386,10 @@ impl App {
             return Task::none();
         };
         match shortcut {
+            Shortcut::Copy => {
+                let block = block.to_owned();
+                return self.copy(&block);
+            }
             Shortcut::Paste => {
                 // Bound to the box and pane focused now, not whichever is when the read returns.
                 let (id, block) = (config.id.clone(), block.to_owned());
@@ -333,6 +402,20 @@ impl App {
                 self.ask_fit(block);
             }
             Shortcut::Zoom => host.zoom(session, block),
+            Shortcut::ClosePane => {
+                // The session's only pane is closed with its tab or the session, never here.
+                if now.tab_panes > 1 || now.tabs.len() > 1 {
+                    let label = now.panes.iter().find(|p| p.block == block).map_or_else(String::new, |p| p.title.clone());
+                    let (config, session, block) = (config.clone(), session.to_owned(), block.to_owned());
+                    self.sheets += 1;
+                    let number = self.sheets;
+                    self.dialog = Some(Dialog::ClosePane { config, session, block, label, number, armed: false });
+                    // Long enough that a click meant for the button can't land on Close.
+                    return Task::perform(rex_backend::pause(Duration::from_millis(300)), move |()| {
+                        cosmic::Action::App(Message::DialogArmed(number))
+                    });
+                }
+            }
             Shortcut::NewTab => host.new_tab(session, block),
             Shortcut::SplitRight => host.split(session, block, Split::Right),
             Shortcut::SplitDown => host.split(session, block, Split::Down),
@@ -404,7 +487,7 @@ impl Application for App {
             }
         }
         let mut app = Self {
-            metrics: Metrics::measure(args.font_size),
+            metrics: Metrics::measure(args.font_size, 1.0),
             demo: args.demo.then(Demo::new),
             nav: nav_bar::Model::default(),
             boxes,
@@ -418,6 +501,11 @@ impl Application for App {
             menu_tab: None,
             hovered_tab: None,
             menu_session: None,
+            closing: Vec::new(),
+            closing_panes: Vec::new(),
+            menu_pane: None,
+            primary: None,
+            copy_problem: None,
             started: Instant::now(),
             core,
             args,
@@ -428,6 +516,9 @@ impl Application for App {
             app.core.nav_bar_set_toggled(false);
         }
         let mut task = app.refresh();
+        if let Some(id) = app.core.main_window_id() {
+            task = Task::batch([task, cosmic::iced::window::scale_factor(id).map(|f| cosmic::Action::App(Message::Scale(f)))]);
+        }
         if app.args.ask
             && let Some((id, agent)) = app.inbox().first().map(|(c, _, a)| (c.id.clone(), (*a).clone()))
         {
@@ -466,6 +557,7 @@ impl Application for App {
             out.push(widget::space::horizontal().width(12).into());
             out.push(ui::tabs(
                 (now.tabs.iter())
+                    .filter(|t| !self.closing(&t.id))
                     .map(|t| ui::TabItem { id: &t.id, label: &t.label, active: now.tab.as_ref() == Some(&t.id) })
                     .collect(),
                 self.hovered_tab.as_deref(),
@@ -540,6 +632,17 @@ impl Application for App {
                 .primary_action(widget::button::suggested("Keep running").on_press(Message::CancelDialog))
                 .secondary_action(widget::button::destructive("Close tab").on_press_maybe(armed.then(|| {
                     Message::CloseTab { id: config.id.clone(), session: session.clone(), window: window.clone() }
+                })))
+                .into(),
+            Dialog::ClosePane { config, session, block, label, armed, .. } => widget::dialog()
+                .title(format!("Close pane \u{2018}{label}\u{2019} on {}?", config.label))
+                .body(format!(
+                    "Ends the program running in this pane on {}, for every device viewing it. The tab's other panes keep running.",
+                    config.label
+                ))
+                .primary_action(widget::button::suggested("Keep running").on_press(Message::CancelDialog))
+                .secondary_action(widget::button::destructive("Close pane").on_press_maybe(armed.then(|| {
+                    Message::ClosePane { id: config.id.clone(), session: session.clone(), block: block.clone() }
                 })))
                 .into(),
             Dialog::Rename { config, label, .. } => widget::dialog()
@@ -634,6 +737,10 @@ impl Application for App {
             );
         }
         all.push(cosmic::iced::time::every(Duration::from_secs(30)).map(|_| Message::Minute));
+        all.push(cosmic::iced::event::listen_with(|event, _, _| match event {
+            cosmic::iced::Event::Window(cosmic::iced::window::Event::Rescaled(f)) => Some(Message::Scale(f)),
+            _ => None,
+        }));
         if self.args.stress {
             all.push(cosmic::iced::time::every(Duration::from_millis(16)).map(|_| Message::DemoTick));
         }
@@ -658,7 +765,8 @@ impl Application for App {
                 if self.current.as_ref() == Some(&id) {
                     let panes = &self.now[at].1.panes;
                     self.cache.retain(|block| panes.iter().any(|p| p.block == block));
-                    return self.retitle();
+                    let primary = self.offer_primary();
+                    return Task::batch([self.retitle(), primary]);
                 }
             }
             Message::Grid(Action::Shortcut(s)) => return self.shortcut(s),
@@ -670,7 +778,7 @@ impl Application for App {
                     demo.resize(&block, cols, rows);
                 }
                 if let Some(host) = self.host() {
-                    host.resize(&block, cols, rows, (cell.width as u16, cell.height as u16));
+                    host.resize(&block, cols, rows, (cell.width.round() as u16, cell.height.round() as u16));
                 }
             }
             Message::Grid(action) => {
@@ -692,6 +800,21 @@ impl Application for App {
                     }
                     Action::Scroll(block, n) => host.scroll(&block, n),
                     Action::Wheel(block, x, y, lines) => host.wheel(&block, x, y, lines),
+                    Action::Select(block, step, at) => {
+                        let revision = host.selection(&block, step, at);
+                        if let (rex_backend::Select::Release, Some(revision), Some(id)) =
+                            (step, revision, self.current.clone())
+                        {
+                            self.primary = Some((id, block, revision));
+                        }
+                    }
+                    Action::Mouse(block, report, cell, mods) => host.mouse(&block, report, cell, &mods),
+                    Action::Menu(block) => self.menu_pane = Some(block),
+                    Action::PastePrimary(block) => {
+                        let Some(id) = self.current.clone() else { return Task::none() };
+                        return clipboard::read_primary()
+                            .map(move |t| cosmic::Action::App(Message::Pasted(id.clone(), block.clone(), t)));
+                    }
                     Action::Resize(..) | Action::Shortcut(_) | Action::Fit(_) | Action::Pane(..) => {}
                 }
             }
@@ -739,6 +862,43 @@ impl Application for App {
                     }
                 }
             }
+            Message::PaneCommand(command) => {
+                let Some(now) = self.here().map(|(_, s)| s) else { return Task::none() };
+                let Some(block) = self
+                    .menu_pane
+                    .clone()
+                    .filter(|b| now.panes.iter().any(|p| &p.block == b))
+                    .or_else(|| now.focused().map(str::to_owned))
+                else {
+                    return Task::none();
+                };
+                let tab = now.tab.clone();
+                let on = |app: &mut Self, s| app.shortcut_on(s, Some(&block));
+                match command {
+                    ui::PaneCommand::Copy => return self.copy(&block),
+                    ui::PaneCommand::Paste => return on(self, Shortcut::Paste),
+                    ui::PaneCommand::SelectAll => {
+                        if let Some(host) = self.host() {
+                            let nowhere = rex_backend::Pointer { cell: (0, 0), position: (0.0, 0.0), cell_width: 1.0, height: 1.0 };
+                            host.selection(&block, rex_backend::Select::All, nowhere);
+                        }
+                    }
+                    ui::PaneCommand::Clear => {
+                        if let Some(host) = self.host() {
+                            host.clear(&block);
+                        }
+                    }
+                    ui::PaneCommand::SplitRight => return on(self, Shortcut::SplitRight),
+                    ui::PaneCommand::SplitDown => return on(self, Shortcut::SplitDown),
+                    ui::PaneCommand::Zoom => return on(self, Shortcut::Zoom),
+                    ui::PaneCommand::ClosePane => return on(self, Shortcut::ClosePane),
+                    ui::PaneCommand::CloseTab => {
+                        if let Some(window) = tab {
+                            return self.update(Message::AskCloseTab(window));
+                        }
+                    }
+                }
+            }
             Message::AskCloseTab(window) => {
                 let Some((config, now)) = self.here() else { return Task::none() };
                 let (Some(session), Some(tab)) =
@@ -757,7 +917,9 @@ impl Application for App {
             }
             Message::DialogArmed(n) => {
                 if let Some(
-                    Dialog::CloseTab { number, armed, .. } | Dialog::CloseSession { number, armed, .. },
+                    Dialog::CloseTab { number, armed, .. }
+                    | Dialog::CloseSession { number, armed, .. }
+                    | Dialog::ClosePane { number, armed, .. },
                 ) = &mut self.dialog
                     && *number == n
                 {
@@ -824,6 +986,14 @@ impl Application for App {
                 self.dialog = None;
                 if let Some(host) = self.boxes.host(&id) {
                     host.close_tab(&session, &window);
+                    self.closing.push((id, window, Instant::now()));
+                }
+            }
+            Message::ClosePane { id, session, block } => {
+                self.dialog = None;
+                if let Some(host) = self.boxes.host(&id) {
+                    host.close_pane(&session, &block);
+                    self.closing_panes.push((id, block, Instant::now()));
                 }
             }
             Message::RenameDraft(text) => {
@@ -1009,6 +1179,13 @@ impl Application for App {
                 return self.refresh();
             }
             Message::Minute => {}
+            Message::Scale(f) => {
+                // COSMIC's own interface scale multiplies the compositor's.
+                let scale = f * self.core.scale_factor();
+                if (scale - self.metrics.scale).abs() > 1e-3 {
+                    self.metrics = Metrics::measure(self.args.font_size, scale);
+                }
+            }
             Message::DemoTick => {
                 if let Some(demo) = &mut self.demo {
                     demo.tick();
@@ -1062,7 +1239,7 @@ impl Application for App {
             };
             return page.push(notice(title, body, vec![button.into()])).into();
         };
-        if let Some(n) = &now.notice {
+        if let Some(n) = now.notice.as_ref().or(self.copy_problem.as_ref()) {
             page = page.push(widget::text::caption(n.as_str()).width(Length::Fill));
         }
         let panes = self.panes();
@@ -1092,17 +1269,41 @@ impl Application for App {
             return page.push(notice(title, body.to_owned(), buttons)).into();
         }
         let identity = Identity { monogram: config.monogram.clone(), tint: ui::tint(config) };
+        let closing = now.tab.as_deref().is_some_and(|t| self.closing(t));
+        // The menu is for the pane the right button went down on: that press comes first.
+        let target = (self.menu_pane.as_deref())
+            .and_then(|b| panes.iter().find(|p| p.block == b))
+            .or_else(|| panes.iter().find(|p| p.focused));
+        let closing_panes: Vec<String> = (self.closing_panes.iter())
+            .filter(|(b, _, sent)| self.current.as_ref() == Some(b) && sent.elapsed() < CLOSE_WAIT)
+            .map(|(_, block, _)| block.clone())
+            .collect();
+        let tab = Tab {
+            keyboard: self.dialog.is_none() && !closing,
+            closing,
+            closing_panes,
+            panes: now.tab_panes,
+            last: now.tab_panes <= 1 && now.tabs.len() <= 1,
+        };
+        let menu = ui::pane_menu(ui::PaneMenu {
+            selected: target.and_then(|p| p.frame.as_ref()).is_some_and(|f| f.selected_text().is_some()),
+            live: target.is_some_and(|p| p.live),
+            zoomed: target.is_some_and(|p| p.zoomed),
+            can_zoom: tab.panes > 1 || target.is_some_and(|p| p.zoomed),
+            can_close: !tab.last,
+        });
+        let grid = Grid::new(
+            panes,
+            identity,
+            tab,
+            &self.cache,
+            self.metrics,
+            Message::Grid,
+        );
         // A margin all round, as in Rex, so no card runs into the window's edge.
         page.push(
-            widget::container(Grid::new(
-                panes,
-                identity,
-                self.dialog.is_none(),
-                &self.cache,
-                self.metrics,
-                Message::Grid,
-            ))
-            .padding([0, 12, 12, 0]),
+            widget::container(widget::context_menu(grid, Some(menu)).on_surface_action(Message::Surface))
+                .padding([0, 12, 12, 0]),
         )
         .into()
     }

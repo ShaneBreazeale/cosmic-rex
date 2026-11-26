@@ -9,19 +9,22 @@ use cosmic::{
         advanced::{
             Clipboard, Layout, Shell, Widget,
             graphics::text::{Raw, Renderer as _, cosmic_text as ct, font_system},
-            layout, renderer,
+            layout, renderer, svg,
             renderer::Renderer as _,
             widget::{Tree, tree},
         },
         keyboard, mouse,
     },
 };
-use rex_backend::{CellRef, CursorShape, Frame, Key, KeyAction, PaneView, Size as Owner, Underline};
+use rex_backend::{
+    Button, CellRef, CursorShape, Frame, Key, KeyAction, Mouse, PaneView, Pointer, Select, Size as Owner, Underline,
+};
 use std::{
     cell::RefCell,
     collections::HashMap,
     hash::{DefaultHasher, Hash, Hasher},
     sync::Arc,
+    time::{Duration, Instant},
 };
 
 use crate::keys;
@@ -31,25 +34,59 @@ const HEADER: f32 = 34.0;
 const GAP: f32 = 12.0;
 /// One header button, and the order they sit in.
 const BUTTON: f32 = 26.0;
-const BUTTONS: [Shortcut; 3] = [Shortcut::SplitRight, Shortcut::SplitDown, Shortcut::Zoom];
+const BUTTONS: [Shortcut; 4] = [Shortcut::SplitRight, Shortcut::SplitDown, Shortcut::Zoom, Shortcut::ClosePane];
+/// Presses closer together than this, on the same cell, count as a double or triple click.
+const MULTI_CLICK: Duration = Duration::from_millis(400);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Metrics {
     pub size: f32,
     pub cell: Size,
+    /// Screen pixels per layout pixel: 1.5 on a 1440p 24-inch screen.
+    pub scale: f32,
 }
 
 impl Metrics {
-    /// The nearest size to `wanted` whose advance is a whole number of pixels, so glyphs,
-    /// backgrounds and underlines stay on one grid however long the row is.
-    pub fn measure(wanted: f32) -> Self {
+    /// The nearest size to `wanted` whose advance is a whole number of screen pixels at
+    /// `scale`, so glyphs, backgrounds and underlines stay on the screen's own pixel grid
+    /// however long the row is. A half-pixel advance would blur every other glyph.
+    pub fn measure(wanted: f32, scale: f32) -> Self {
+        let scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
         let mut fonts = font_system().write().expect("font system");
         let advance = advance(fonts.raw(), wanted);
-        let width = advance.round().max(1.0);
+        let width = (advance * scale).round().max(1.0) / scale;
         Self {
             size: wanted * width / advance,
-            cell: Size::new(width, (wanted * 1.45).round()),
+            cell: Size::new(width, (wanted * 1.45 * scale).round().max(1.0) / scale),
+            scale,
         }
+    }
+
+    /// These metrics, or smaller ones that show all of a `cols` × `rows` grid in a pane of
+    /// `space`: a pane another device sized is drawn whole rather than cut off, and nothing is
+    /// resized. Never below 70% of the usual size, which stays readable; past that the grid is
+    /// cut off as before, keeping the rows around the cursor.
+    pub fn fit(&self, cols: u16, rows: u16, space: Size) -> Self {
+        let (w, h) = (space.width - 2.0 * PAD, space.height - HEADER - 2.0 * PAD);
+        let fits = |m: &Self| f32::from(cols) * m.cell.width <= w && f32::from(rows) * m.cell.height <= h;
+        if fits(self) || cols == 0 || rows == 0 {
+            return *self;
+        }
+        let ratio = (w / (f32::from(cols) * self.cell.width)).min(h / (f32::from(rows) * self.cell.height));
+        let floor = (self.size * 0.7).max(6.0);
+        let mut wanted = (self.size * ratio).max(floor);
+        loop {
+            let m = Self::measure(wanted, self.scale);
+            if fits(&m) || wanted <= floor {
+                return m;
+            }
+            wanted = (wanted - 0.25).max(floor);
+        }
+    }
+
+    /// The nearest edge between screen pixels.
+    pub fn snap(&self, v: f32) -> f32 {
+        (v * self.scale).round() / self.scale
     }
 
     pub fn grid(&self, pane: Size) -> (u16, u16) {
@@ -82,6 +119,9 @@ struct Row {
 /// Shaped text and the column each piece starts at.
 type Segments = Arc<[(usize, Arc<ct::Buffer>)]>;
 
+/// Base size and scale, grid columns and rows, pane width and height.
+type FitKey = (u32, u16, u16, u32, u32);
+
 /// Shaped rows per pane, owned by the app so they outlive a view.
 #[derive(Default)]
 pub struct Cache {
@@ -89,6 +129,8 @@ pub struct Cache {
     /// Guessed text being drawn; the renderer only keeps weak references.
     guesses: RefCell<HashMap<String, (String, Arc<ct::Buffer>)>>,
     pub shaped: std::cell::Cell<u64>,
+    /// Fitted metrics by base size, grid and pane size: measuring shapes text.
+    fits: RefCell<HashMap<FitKey, Metrics>>,
 }
 
 impl Cache {
@@ -97,10 +139,20 @@ impl Cache {
         self.guesses.borrow_mut().retain(|block, _| keep(block));
     }
 
+    fn fit(&self, m: Metrics, cols: u16, rows: u16, space: Size) -> Metrics {
+        let key = (m.size.to_bits() ^ m.scale.to_bits().rotate_left(16), cols, rows, space.width as u32, space.height as u32);
+        let mut fits = self.fits.borrow_mut();
+        if fits.len() > 256 {
+            fits.clear();
+        }
+        *fits.entry(key).or_insert_with(|| m.fit(cols, rows, space))
+    }
+
     fn guess(&self, block: &str, text: &str, m: Metrics) -> Arc<ct::Buffer> {
         let mut guesses = self.guesses.borrow_mut();
         if let Some((old, buffer)) = guesses.get(block)
             && old == text
+            && buffer.metrics().font_size == m.size
         {
             return buffer.clone();
         }
@@ -225,19 +277,37 @@ fn ground(bg: u32, theme: &Theme) -> Color {
     }
 }
 
-/// The header buttons, drawn from rules rather than font glyphs, which vary by machine.
-fn glyph(r: &mut Renderer, b: Rectangle, s: Shortcut, ink: Color) {
-    let frame = Rectangle { x: b.center_x() - 7.0, y: b.center_y() - 5.5, width: 14.0, height: 11.0 };
-    let line = |r: &mut Renderer, bounds: Rectangle| {
-        r.fill_quad(renderer::Quad { bounds, ..Default::default() }, Background::Color(ink));
-    };
-    let border = Border { color: ink, width: 1.2, radius: 2.0.into() };
-    r.fill_quad(renderer::Quad { bounds: frame, border, ..Default::default() }, Background::Color(Color::TRANSPARENT));
-    match s {
-        Shortcut::SplitRight => line(r, Rectangle { x: frame.center_x() - 0.5, width: 1.2, ..frame }),
-        Shortcut::SplitDown => line(r, Rectangle { y: frame.center_y() - 0.5, height: 1.2, ..frame }),
-        _ => line(r, Rectangle { x: frame.x + 3.0, y: frame.y + 3.0, width: frame.width - 6.0, height: frame.height - 6.0 }),
+/// The header buttons' icons, as vectors: drawn at the display's own scale, and the same on
+/// every machine, which theme icons are not.
+fn icon(s: Shortcut, zoomed: bool) -> &'static svg::Handle {
+    use std::sync::LazyLock;
+    fn make(body: &str) -> svg::Handle {
+        svg::Handle::from_memory(format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="black" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">{body}</svg>"#
+        ).into_bytes())
     }
+    static RIGHT: LazyLock<svg::Handle> =
+        LazyLock::new(|| make(r#"<rect x="1.7" y="2.7" width="12.6" height="10.6" rx="2"/><path d="M8 2.7v10.6"/>"#));
+    static DOWN: LazyLock<svg::Handle> =
+        LazyLock::new(|| make(r#"<rect x="1.7" y="2.7" width="12.6" height="10.6" rx="2"/><path d="M1.7 8h12.6"/>"#));
+    static ZOOM: LazyLock<svg::Handle> =
+        LazyLock::new(|| make(r#"<path d="M3 3l10 10M3 7.5V3h4.5M13 8.5V13H8.5"/>"#));
+    static RESTORE: LazyLock<svg::Handle> =
+        LazyLock::new(|| make(r#"<path d="M2.5 2.5l4.5 4.5M7 3.2V7H3.2M13.5 13.5L9 9M9 12.8V9h3.8"/>"#));
+    static CLOSE: LazyLock<svg::Handle> = LazyLock::new(|| make(r#"<path d="M4 4l8 8M12 4l-8 8"/>"#));
+    match s {
+        Shortcut::SplitRight => &RIGHT,
+        Shortcut::SplitDown => &DOWN,
+        Shortcut::Zoom if zoomed => &RESTORE,
+        Shortcut::Zoom => &ZOOM,
+        _ => &CLOSE,
+    }
+}
+
+fn glyph(r: &mut Renderer, b: Rectangle, s: Shortcut, zoomed: bool, ink: Color, clip: Rectangle) {
+    use cosmic::iced::advanced::svg::Renderer as _;
+    let at = Rectangle { x: b.center_x() - 8.0, y: b.center_y() - 8.0, width: 16.0, height: 16.0 };
+    r.draw_svg(svg::Svg::new(icon(s, zoomed).clone()).color(ink), at, clip);
 }
 
 #[derive(Clone, Debug)]
@@ -253,17 +323,44 @@ pub enum Action {
     Fit(String),
     /// A header button: this pane, not whichever has the keyboard.
     Pane(String, Shortcut),
+    /// A step of selecting with the pointer in this pane.
+    Select(String, Select, Pointer),
+    /// A mouse report for the program in this pane, which asked for them: the cell and the
+    /// modifiers held, never Shift.
+    Mouse(String, Mouse, (u16, u16), String),
+    /// The right button went down here: the pane menu about to open acts on this pane.
+    Menu(String),
+    /// A middle click: paste the primary selection here.
+    PastePrimary(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Shortcut {
+    Copy,
     Paste,
     NewTab,
     SplitRight,
     SplitDown,
     Zoom,
+    /// Asks first: it ends the pane's program.
+    ClosePane,
     Agents,
     Fit,
+}
+
+/// What holds for the tab on screen as a whole.
+#[derive(Clone, Debug)]
+pub struct Tab {
+    /// False while a dialog has the keyboard: no key may reach a terminal then.
+    pub keyboard: bool,
+    /// Its programs have ended, so it is not "paused".
+    pub closing: bool,
+    /// Panes whose close was confirmed: their program has ended, so they are not "paused".
+    pub closing_panes: Vec<String>,
+    /// Panes in it, shown or behind a zoomed one: zooming needs two.
+    pub panes: usize,
+    /// It holds the session's only pane, which its header does not offer to close.
+    pub last: bool,
 }
 
 /// Which machine the panes are on, drawn where typing happens.
@@ -276,8 +373,7 @@ pub struct Identity {
 pub struct Grid<'a, M> {
     panes: Vec<PaneView>,
     identity: Identity,
-    /// False while a dialog has the keyboard: no key may reach a terminal then.
-    keyboard: bool,
+    tab: Tab,
     cache: &'a Cache,
     metrics: Metrics,
     on: Box<dyn Fn(Action) -> M + 'a>,
@@ -287,12 +383,12 @@ impl<'a, M> Grid<'a, M> {
     pub fn new(
         panes: Vec<PaneView>,
         identity: Identity,
-        keyboard: bool,
+        tab: Tab,
         cache: &'a Cache,
         metrics: Metrics,
         on: impl Fn(Action) -> M + 'a,
     ) -> Self {
-        Self { panes, identity, keyboard, cache, metrics, on: Box::new(on) }
+        Self { panes, identity, tab, cache, metrics, on: Box::new(on) }
     }
 
     fn rect(&self, pane: &PaneView, b: Rectangle) -> Rectangle {
@@ -301,27 +397,56 @@ impl<'a, M> Grid<'a, M> {
         let (l, t) = (if x > 0.001 { GAP / 2.0 } else { 0.0 }, if y > 0.001 { GAP / 2.0 } else { 0.0 });
         let r = if x + w < 0.999 { GAP / 2.0 } else { 0.0 };
         let bottom = if y + h < 0.999 { GAP / 2.0 } else { 0.0 };
+        // Edges on screen pixels, so hairlines and text are sharp at any scale.
+        let snap = |v: f32| self.metrics.snap(v);
+        let (left, top) = (snap(b.x + x * b.width + l), snap(b.y + y * b.height + t));
         Rectangle {
-            x: (b.x + x * b.width + l).round(),
-            y: (b.y + y * b.height + t).round(),
-            width: (w * b.width - l - r).round().max(1.0),
-            height: (h * b.height - t - bottom).round().max(1.0),
+            x: left,
+            y: top,
+            width: (snap(b.x + (x + w) * b.width - r) - left).max(1.0),
+            height: (snap(b.y + (y + h) * b.height - bottom) - top).max(1.0),
         }
     }
 
-    /// Split right, split down and zoom at the header's end; none on a pane too narrow for them.
-    fn buttons(&self, rect: Rectangle) -> Vec<(Rectangle, Shortcut)> {
-        if rect.width < 300.0 {
-            return Vec::new();
+    /// The cell size this pane is drawn at: ours always fits, as we size it; another device's
+    /// grid is drawn smaller if that is what it takes to show all of it.
+    fn pane_metrics(&self, pane: &PaneView, rect: Rectangle) -> Metrics {
+        match (&pane.frame, pane.size) {
+            (Some(f), Owner::Elsewhere | Owner::Unclaimed) => self.cache.fit(self.metrics, f.cols(), f.rows(), rect.size()),
+            _ => self.metrics,
         }
+    }
+
+    /// The top-left corner of a pane's character grid, on a screen pixel.
+    fn origin(&self, rect: Rectangle) -> Point {
+        Point::new(self.metrics.snap(rect.x + PAD), self.metrics.snap(rect.y + HEADER + PAD))
+    }
+
+    /// Split right, split down, zoom and close at the header's end, as in Rex. A narrow pane
+    /// keeps zoom and close; one narrower still has none.
+    fn buttons(&self, rect: Rectangle) -> Vec<(Rectangle, Shortcut)> {
+        let shown = match rect.width {
+            w if w >= 300.0 => &BUTTONS[..],
+            w if w >= 180.0 => &BUTTONS[2..],
+            _ => return Vec::new(),
+        };
         let end = rect.x + rect.width - 8.0;
         let y = rect.y + (HEADER - BUTTON) / 2.0;
-        (BUTTONS.iter().enumerate())
+        (shown.iter().enumerate())
             .map(|(i, s)| {
-                let x = end - (BUTTONS.len() - i) as f32 * BUTTON;
+                let x = end - (shown.len() - i) as f32 * BUTTON;
                 (Rectangle { x, y, width: BUTTON, height: BUTTON }, *s)
             })
             .collect()
+    }
+
+    /// Whether a header button can act on this pane now.
+    fn can(&self, pane: &PaneView, s: Shortcut) -> bool {
+        match s {
+            Shortcut::Zoom => pane.zoomed || self.tab.panes > 1,
+            Shortcut::ClosePane => !self.tab.last,
+            _ => true,
+        }
     }
 
     /// Where the header's own text and chips must end.
@@ -357,6 +482,48 @@ impl<'a, M> Grid<'a, M> {
     fn at(&self, p: Point, b: Rectangle) -> Option<&PaneView> {
         self.panes.iter().rev().find(|pane| self.rect(pane, b).contains(p))
     }
+
+    /// The terminal under a point, which may be outside the pane while a drag goes past its
+    /// edge: the cell is clamped to the rows on screen, the position is not.
+    fn pointer(&self, pane: &PaneView, rect: Rectangle, p: Point) -> Option<Pointer> {
+        let frame = pane.frame.as_ref()?;
+        let m = self.pane_metrics(pane, rect);
+        let origin = self.origin(rect);
+        let (x, y) = (p.x - origin.x, p.y - origin.y);
+        let visible = ((rect.height - HEADER - 2.0 * PAD) / m.cell.height).floor().max(1.0) as usize;
+        let first = frame.first_row(visible);
+        let col = ((x / m.cell.width).floor().max(0.0) as usize).min(usize::from(frame.cols().max(1)) - 1);
+        let row = ((y / m.cell.height).floor().max(0.0) as usize).min(visible - 1) + first;
+        let row = row.min(usize::from(frame.rows().max(1)) - 1);
+        Some(Pointer {
+            cell: (col as u16, row as u16),
+            position: (x, y),
+            cell_width: m.cell.width,
+            height: visible as f32 * m.cell.height,
+        })
+    }
+
+    /// The program asked for the mouse, and Shift is not held to select instead.
+    fn reports(pane: &PaneView, m: keyboard::Modifiers) -> bool {
+        pane.frame.as_ref().is_some_and(Frame::mouse_tracking) && !m.shift()
+    }
+}
+
+/// Modifiers as a mouse report carries them. Shift never goes along: it is the selection override.
+fn mouse_mods(m: keyboard::Modifiers) -> String {
+    [(m.control(), "ctrl"), (m.alt(), "alt"), (m.logo(), "super")]
+        .into_iter()
+        .filter_map(|(on, name)| on.then_some(name))
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
+/// A left-button gesture under way, in the pane it began in.
+struct Press {
+    block: String,
+    /// Reported to the program rather than selecting.
+    reported: bool,
+    cell: (u16, u16),
 }
 
 #[derive(Default)]
@@ -366,6 +533,13 @@ struct State {
     scroll: f32,
     /// Presses sent to the program, so a release is sent only for those.
     down: std::collections::HashSet<keyboard::key::Physical>,
+    press: Option<Press>,
+    /// A middle press reported to the program, so its release is too.
+    middle: Option<(String, (u16, u16))>,
+    /// The last left press, for counting double and triple clicks.
+    click: Option<(Instant, String, (u16, u16), u32)>,
+    /// The pane under the pointer and the header button, if any, as last drawn.
+    hover: Option<(String, Option<Shortcut>)>,
 }
 
 impl<M> Widget<M, Theme, Renderer> for Grid<'_, M> {
@@ -411,7 +585,7 @@ impl<M> Widget<M, Theme, Renderer> for Grid<'_, M> {
             Event::Keyboard(keyboard::Event::ModifiersChanged(m)) => state.modifiers = *m,
             Event::Keyboard(keyboard::Event::KeyPressed {
                 key, physical_key, modifiers, text, repeat, ..
-            }) if self.keyboard && !shell.is_event_captured() => {
+            }) if self.tab.keyboard && !shell.is_event_captured() => {
                 if let Some(shortcut) = shortcut(physical_key, *modifiers) {
                     if !*repeat {
                         shell.publish((self.on)(Action::Shortcut(shortcut)));
@@ -441,14 +615,111 @@ impl<M> Widget<M, Theme, Renderer> for Grid<'_, M> {
                 let Some(pane) = self.at(p, bounds) else { return };
                 let rect = self.rect(pane, bounds);
                 if let Some((_, s)) = self.buttons(rect).into_iter().find(|(b, _)| b.contains(p)) {
-                    shell.publish((self.on)(Action::Pane(pane.block.clone(), s)));
+                    if self.can(pane, s) {
+                        shell.publish((self.on)(Action::Pane(pane.block.clone(), s)));
+                    }
                     shell.capture_event();
+                    return;
                 } else if self.chip(pane, rect).is_some_and(|(c, _)| c.contains(p)) {
                     shell.publish((self.on)(Action::Fit(pane.block.clone())));
                     shell.capture_event();
-                } else if !pane.focused {
+                    return;
+                }
+                if !pane.focused {
                     shell.publish((self.on)(Action::Focus(pane.block.clone())));
-                    shell.capture_event();
+                }
+                shell.capture_event();
+                let Some(at) = self.pointer(pane, rect, p).filter(|_| p.y >= rect.y + HEADER) else { return };
+                let block = pane.block.clone();
+                if Self::reports(pane, state.modifiers) {
+                    if self.tab.keyboard {
+                        let report = Mouse::Press(Button::Left);
+                        shell.publish((self.on)(Action::Mouse(block.clone(), report, at.cell, mouse_mods(state.modifiers))));
+                        state.press = Some(Press { block, reported: true, cell: at.cell });
+                    }
+                    return;
+                }
+                let clicks = match &state.click {
+                    Some((when, b, cell, n)) if when.elapsed() < MULTI_CLICK && *b == block && *cell == at.cell => n % 3 + 1,
+                    _ => 1,
+                };
+                state.click = Some((Instant::now(), block.clone(), at.cell, clicks));
+                shell.publish((self.on)(Action::Select(block.clone(), Select::Press(clicks), at)));
+                state.press = Some(Press { block, reported: false, cell: at.cell });
+            }
+            Event::Mouse(mouse::Event::CursorMoved { position }) => {
+                // Nothing else redraws this widget as the pointer goes from button to button.
+                let hover = cursor.position_over(bounds).and_then(|p| {
+                    let pane = self.at(p, bounds)?;
+                    let button = self.buttons(self.rect(pane, bounds)).into_iter().find(|(b, _)| b.contains(p));
+                    Some((pane.block.clone(), button.map(|(_, s)| s)))
+                });
+                if hover != state.hover {
+                    state.hover = hover;
+                    shell.request_redraw();
+                }
+                let Some(press) = &mut state.press else { return };
+                let Some(pane) = self.panes.iter().find(|p| p.block == press.block) else { return };
+                let Some(at) = self.pointer(pane, self.rect(pane, bounds), *position) else { return };
+                // A report per cell crossed, and a selection step per cell too: the core
+                // places a selection by cell and half cell, from the position.
+                if press.reported {
+                    if at.cell != press.cell {
+                        let report = Mouse::Drag(Button::Left);
+                        shell.publish((self.on)(Action::Mouse(press.block.clone(), report, at.cell, mouse_mods(state.modifiers))));
+                    }
+                } else {
+                    shell.publish((self.on)(Action::Select(press.block.clone(), Select::Drag, at)));
+                }
+                press.cell = at.cell;
+            }
+            Event::Mouse(mouse::Event::CursorLeft) => {
+                if state.hover.take().is_some() {
+                    shell.request_redraw();
+                }
+            }
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                let Some(press) = state.press.take() else { return };
+                let Some(pane) = self.panes.iter().find(|p| p.block == press.block) else { return };
+                let at = cursor
+                    .position()
+                    .and_then(|p| self.pointer(pane, self.rect(pane, bounds), p))
+                    .unwrap_or(Pointer { cell: press.cell, position: (0.0, 0.0), cell_width: 1.0, height: 1.0 });
+                shell.publish((self.on)(if press.reported {
+                    Action::Mouse(press.block, Mouse::Release(Button::Left), at.cell, mouse_mods(state.modifiers))
+                } else {
+                    Action::Select(press.block, Select::Release, at)
+                }));
+            }
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) => {
+                // Not captured: the pane menu around this widget opens on the release.
+                let Some(p) = cursor.position_over(bounds) else { return };
+                if let Some(pane) = self.at(p, bounds) {
+                    shell.publish((self.on)(Action::Menu(pane.block.clone())));
+                }
+            }
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Middle)) => {
+                let Some(p) = cursor.position_over(bounds) else { return };
+                let Some(pane) = self.at(p, bounds) else { return };
+                let rect = self.rect(pane, bounds);
+                let Some(at) = self.pointer(pane, rect, p).filter(|_| p.y >= rect.y + HEADER) else { return };
+                if !self.tab.keyboard {
+                    return;
+                }
+                shell.capture_event();
+                let block = pane.block.clone();
+                if Self::reports(pane, state.modifiers) {
+                    let report = Mouse::Press(Button::Middle);
+                    shell.publish((self.on)(Action::Mouse(block.clone(), report, at.cell, mouse_mods(state.modifiers))));
+                    state.middle = Some((block, at.cell));
+                } else {
+                    shell.publish((self.on)(Action::PastePrimary(block)));
+                }
+            }
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Middle)) => {
+                if let Some((block, cell)) = state.middle.take() {
+                    let report = Mouse::Release(Button::Middle);
+                    shell.publish((self.on)(Action::Mouse(block, report, cell, mouse_mods(state.modifiers))));
                 }
             }
             Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
@@ -463,16 +734,9 @@ impl<M> Widget<M, Theme, Renderer> for Grid<'_, M> {
                     return;
                 }
                 state.scroll -= lines;
-                let r = self.rect(pane, bounds);
-                let tracking = pane.frame.as_ref().is_some_and(|f| f.mouse_tracking());
-                shell.publish((self.on)(if tracking && !state.modifiers.shift() {
-                    let cell = |v: f32, size: f32| ((v - PAD) / size).max(0.0) as u16;
-                    Action::Wheel(
-                        pane.block.clone(),
-                        cell(p.x - r.x, self.metrics.cell.width),
-                        cell(p.y - r.y - HEADER, self.metrics.cell.height),
-                        lines as i32,
-                    )
+                let at = self.pointer(pane, self.rect(pane, bounds), p);
+                shell.publish((self.on)(if let Some(at) = at.filter(|_| Self::reports(pane, state.modifiers)) {
+                    Action::Wheel(pane.block.clone(), at.cell.0, at.cell.1, lines as i32)
                 } else {
                     Action::Scroll(pane.block.clone(), lines as isize)
                 }));
@@ -484,7 +748,7 @@ impl<M> Widget<M, Theme, Renderer> for Grid<'_, M> {
 
     fn mouse_interaction(
         &self,
-        _: &Tree,
+        tree: &Tree,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         _: &Rectangle,
@@ -498,7 +762,7 @@ impl<M> Widget<M, Theme, Renderer> for Grid<'_, M> {
                 || self.buttons(rect).iter().any(|(b, _)| b.contains(p))
             {
                 mouse::Interaction::Pointer
-            } else if p.y < rect.y + HEADER {
+            } else if p.y < rect.y + HEADER || Self::reports(pane, tree.state.downcast_ref::<State>().modifiers) {
                 mouse::Interaction::None
             } else {
                 mouse::Interaction::Text
@@ -510,20 +774,21 @@ impl<M> Widget<M, Theme, Renderer> for Grid<'_, M> {
 
     fn draw(
         &self,
-        _: &Tree,
+        tree: &Tree,
         renderer: &mut Renderer,
         theme: &Theme,
         _: &renderer::Style,
         layout: Layout<'_>,
-        cursor: mouse::Cursor,
+        _: mouse::Cursor,
         viewport: &Rectangle,
     ) {
         let bounds = layout.bounds();
-        let over = cursor.position_over(bounds).and_then(|p| Some((p, &self.at(p, bounds)?.block)));
+        // What `update` last found under the pointer, the same state that asked for this frame.
+        let over = &tree.state.downcast_ref::<State>().hover;
         for pane in &self.panes {
             let rect = self.rect(pane, bounds);
             let Some(clip) = rect.intersection(viewport) else { continue };
-            let hover = over.filter(|(_, b)| **b == pane.block).map(|(p, _)| p);
+            let hover = over.as_ref().filter(|(b, _)| *b == pane.block).map(|(_, s)| *s);
             // A layer per pane keeps a wider server-sized grid from spilling into neighbours.
             renderer.with_layer(clip, |r| self.draw_pane(r, pane, rect, clip, theme, hover));
         }
@@ -539,9 +804,10 @@ impl<M> Grid<'_, M> {
         rect: Rectangle,
         clip: Rectangle,
         theme: &Theme,
-        hover: Option<Point>,
+        // Over this pane, and over which of its buttons.
+        hover: Option<Option<Shortcut>>,
     ) {
-        let m = self.metrics;
+        let m = self.pane_metrics(pane, rect);
         let c = theme.cosmic();
         let accent: Color = c.accent_color().into();
         let radius = c.radius_m();
@@ -600,10 +866,11 @@ impl<M> Grid<'_, M> {
         // Quiet until wanted: the buttons show on the pane with the keyboard or under the pointer.
         if hover.is_some() || pane.focused {
             for (b, s) in self.buttons(rect) {
-                if hover.is_some_and(|p| b.contains(p)) {
+                let can = self.can(pane, s);
+                if can && hover == Some(Some(s)) {
                     rounded(r, b, Color { a: 0.1, ..ink }, c.radius_s());
                 }
-                glyph(r, b, s, Color { a: 0.75, ..ink });
+                glyph(r, b, s, pane.zoomed, Color { a: if can { 0.8 } else { 0.3 }, ..ink }, clip);
             }
         }
         let body = Rectangle { y: rect.y + HEADER, height: (rect.height - HEADER).max(0.0), ..rect };
@@ -627,7 +894,7 @@ impl<M> Grid<'_, M> {
             outline(r);
             return;
         };
-        let origin = Point::new(body.x + PAD, body.y + PAD);
+        let origin = self.origin(Rectangle { y: body.y - HEADER, ..body });
         let rect = body;
         let visible = (((rect.height - 2.0 * PAD) / m.cell.height).floor().max(1.0) as usize).max(1);
         // A pane someone else sized may be taller than our view: the core says which rows to show.
@@ -718,11 +985,12 @@ impl<M> Grid<'_, M> {
                 }
             }
         }
-        if !pane.live {
-            // Pattern and words, not just colour: this screen is only the last one seen.
+        let closing = self.tab.closing || self.tab.closing_panes.contains(&pane.block);
+        if closing || !pane.live {
             rounded(r, body, Color { a: 0.45, ..Color::from(c.bg_color()) }, lower);
+            // Pattern and words, not just colour: this screen is only the last one seen.
             let mut y = body.y + 12.0;
-            while y < body.y + body.height {
+            while !closing && y < body.y + body.height {
                 fill(r, Rectangle { y, height: 1.0, ..body }, Color { a: 0.25, ..on });
                 y += 12.0;
             }
@@ -736,7 +1004,12 @@ impl<M> Grid<'_, M> {
             use cosmic::iced::advanced::text::{self, Renderer as _};
             r.fill_text(
                 text::Text {
-                    content: "Paused · last screen seen · keys are not sent".to_owned(),
+                    content: match (self.tab.closing, closing) {
+                        (true, _) => "Closing tab…",
+                        (false, true) => "Closing pane…",
+                        _ => "Paused · last screen seen · keys are not sent",
+                    }
+                        .to_owned(),
                     bounds: plate.size(),
                     size: 12.0.into(),
                     line_height: text::LineHeight::default(),
@@ -769,10 +1042,12 @@ fn shortcut(key: &keyboard::key::Physical, m: keyboard::Modifiers) -> Option<Sho
     }
     let Physical::Code(code) = key else { return None };
     Some(match code {
+        Code::KeyC => Shortcut::Copy,
         Code::KeyV => Shortcut::Paste,
         Code::KeyT => Shortcut::NewTab,
         Code::KeyD => Shortcut::SplitRight,
         Code::KeyE => Shortcut::SplitDown,
+        Code::KeyW => Shortcut::ClosePane,
         Code::Enter => Shortcut::Zoom,
         Code::KeyA => Shortcut::Agents,
         Code::KeyS => Shortcut::Fit,
@@ -786,8 +1061,11 @@ mod tests {
 
     #[test]
     fn a_long_run_stays_on_the_cell_grid() {
-        for wanted in [10.0, 12.0, 14.0, 15.5, 20.0] {
-            let m = Metrics::measure(wanted);
+        for (wanted, scale) in [(10.0, 1.0), (12.0, 1.0), (14.0, 1.5), (15.5, 1.25), (20.0, 2.0), (13.0, 1.5)] {
+            let m = Metrics::measure(wanted, scale);
+            for v in [m.cell.width, m.cell.height] {
+                assert!(((v * scale) - (v * scale).round()).abs() < 1e-3, "{wanted}@{scale}: {m:?}");
+            }
             let mut fonts = font_system().write().unwrap();
             let fonts = fonts.raw();
             let mut buffer = ct::Buffer::new(fonts, ct::Metrics::new(m.size, m.cell.height));
@@ -797,6 +1075,55 @@ mod tests {
             let width = buffer.layout_runs().next().unwrap().line_w;
             assert!((width - 200.0 * m.cell.width).abs() < 1.0, "{wanted}: {width} vs {m:?}");
         }
+    }
+
+    #[test]
+    fn the_pointer_finds_its_cell_and_a_drag_past_the_edge_stays_on_the_grid() {
+        let panes = rex_backend::demo::Demo::new().panes();
+        let pane = panes[0].clone();
+        let frame = pane.frame.clone().unwrap();
+        let cache = Cache::default();
+        let m = Metrics { size: 14.0, cell: Size::new(8.0, 18.0), scale: 1.0 };
+        let grid = Grid::new(panes, Identity { monogram: "AB".into(), tint: Color::BLACK }, Tab { keyboard: true, closing: false, closing_panes: Vec::new(), panes: 2, last: false }, &cache, m, |a| a);
+        let rect = Rectangle { x: 100.0, y: 50.0, width: 800.0, height: 600.0 };
+        let origin = Point::new(rect.x + PAD, rect.y + HEADER + PAD);
+        let at = |dx: f32, dy: f32| grid.pointer(&pane, rect, Point::new(origin.x + dx, origin.y + dy)).unwrap();
+        let visible = ((rect.height - HEADER - 2.0 * PAD) / 18.0).floor() as usize;
+        let first = frame.first_row(visible) as u16;
+        assert_eq!(at(0.0, 0.0).cell, (0, first));
+        assert_eq!(at(8.0 * 3.0 + 7.9, 18.0 * 2.0 + 1.0).cell, (3, first + 2));
+        assert_eq!(at(28.5, 0.0).position, (28.5, 0.0));
+        // Past the top-left and the bottom-right, the cell stops at the grid's edge.
+        let above = at(-50.0, -40.0);
+        assert_eq!((above.cell, above.position), ((0, first), (-50.0, -40.0)));
+        let below = at(1e4, 1e4).cell;
+        assert_eq!(below.0, frame.cols() - 1);
+        assert!(below.1 < frame.rows() && usize::from(below.1 - first) < visible);
+    }
+
+    #[test]
+    fn a_grid_sized_elsewhere_is_drawn_whole_and_never_bigger() {
+        let m = Metrics::measure(14.0, 1.5);
+        let room = |m: &Metrics, cols: u16, rows: u16| {
+            (f32::from(cols) * m.cell.width + 2.0 * PAD, f32::from(rows) * m.cell.height + HEADER + 2.0 * PAD)
+        };
+        let space = Size::new(700.0, 500.0);
+        assert_eq!(m.fit(40, 10, space), m, "a grid that fits keeps the usual size");
+        for (cols, rows) in [(100, 20), (70, 28), (110, 30)] {
+            let f = m.fit(cols, rows, space);
+            let (w, h) = room(&f, cols, rows);
+            assert!(w <= space.width && h <= space.height && f.size < m.size, "{cols}x{rows}: {f:?}");
+            assert!(((f.cell.width * 1.5) - (f.cell.width * 1.5).round()).abs() < 1e-3);
+        }
+        let floor = m.fit(2000, 900, space);
+        assert!(floor.size >= m.size * 0.69, "never unreadably small: {floor:?}");
+    }
+
+    #[test]
+    fn mouse_reports_never_carry_shift() {
+        use keyboard::Modifiers as M;
+        assert_eq!(mouse_mods(M::SHIFT | M::CTRL | M::ALT), "ctrl+alt");
+        assert_eq!(mouse_mods(M::SHIFT), "");
     }
 
     #[test]

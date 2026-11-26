@@ -16,7 +16,7 @@ mod predict;
 pub use answer::{AnswerKey, Asker, Outcome, Question, Reply, Ticket, pause};
 pub use boxes::{BoxConfig, Boxes, TINTS};
 pub use frame::{CellRef, CursorShape, Frame, Underline};
-pub use host::{Host, Key, KeyAction, Split, Wake};
+pub use host::{Button, Host, Key, KeyAction, Mouse, Pointer, Select, Split, Wake};
 pub use predict::set_local_echo;
 pub use model::{Agent, AgentState, PaneView, Session, Size, Snapshot, Tab, WaitingFor, plain};
 

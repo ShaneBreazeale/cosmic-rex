@@ -6,6 +6,7 @@ use rex_rune::{
         perform::Outcome,
     },
     layout,
+    terminal::selection,
 };
 use serde_json::{Value, json};
 use std::{
@@ -79,6 +80,47 @@ pub enum Split {
     Down,
 }
 
+/// A step of a pointer selection in one pane. Selections are this client's own: nothing reaches
+/// the server or the program.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Select {
+    /// Pressed: 1 starts at a cell, 2 takes a word, 3 or more a line.
+    Press(u32),
+    Drag,
+    Release,
+    Clear,
+    /// The whole screen and scrollback.
+    All,
+}
+
+/// Where the pointer is over a pane's grid.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pointer {
+    /// Column and row of the frame, clamped to it.
+    pub cell: (u16, u16),
+    /// Pixels from the grid's top-left corner; outside the grid while dragging past its edge.
+    pub position: (f32, f32),
+    pub cell_width: f32,
+    /// Pixels of grid on screen, so a drag past the edge scrolls.
+    pub height: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Button {
+    Left,
+    Middle,
+    Right,
+}
+
+/// A mouse report for a program that asked for them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mouse {
+    Press(Button),
+    /// Moved with this button held.
+    Drag(Button),
+    Release(Button),
+}
+
 pub struct Host {
     /// Distinguishes this connection's wakes from an earlier one to the same box.
     serial: u64,
@@ -90,6 +132,8 @@ pub struct Host {
     /// Unclaimed panes this client has asked to size, once each.
     asked: Mutex<HashSet<String>>,
     predictors: Mutex<HashMap<String, Predictor>>,
+    /// Each pane's last selection step and its revision, so a release or clear can follow it.
+    selections: Mutex<HashMap<String, (u64, Option<selection::Input>)>>,
 }
 
 fn next_serial() -> u64 {
@@ -111,6 +155,7 @@ impl Host {
             navigation: Mutex::new(0),
             asked: Mutex::default(),
             predictors: Mutex::default(),
+            selections: Mutex::default(),
         }
     }
 
@@ -237,6 +282,88 @@ impl Host {
             self.predict(block, Predictor::reset);
         }
     }
+    /// Report the pointer to a program that tracks the mouse. Only a press asks for an
+    /// unclaimed pane's size, as typing does; nothing takes one another client sized.
+    pub fn mouse(&self, block: &str, mouse: Mouse, cell: (u16, u16), mods: &str) {
+        let (action, button, claims) = match mouse {
+            Mouse::Press(b) => ("press", b, true),
+            Mouse::Drag(b) => ("motion", b, false),
+            Mouse::Release(b) => ("release", b, false),
+        };
+        let button = match button {
+            Button::Left => "left",
+            Button::Middle => "middle",
+            Button::Right => "right",
+        };
+        let event = json!({"event": {"type": "mouse", "payload": {
+            "action": action, "button": button, "x": cell.0, "y": cell.1, "mods": mods}}});
+        self.type_into(block, "block.event", event, claims);
+    }
+    /// One step of a selection in this pane, made by this client on its own copy of the screen.
+    /// Its text comes with the first frame whose `selection_revision` is the one returned.
+    pub fn selection(&self, block: &str, step: Select, at: Pointer) -> Option<u64> {
+        let (generation, cols) = {
+            let terminals = self.terminals.lock().expect("terminals");
+            let t = terminals.get(block)?.model.lock().expect("terminal model");
+            (t.restore_generation, t.frame.as_ref().map_or(1, |f| f.cols))
+        };
+        let mut selections = self.selections.lock().expect("selections");
+        let (revision, last) = selections.entry(block.to_owned()).or_default();
+        let phase = match step {
+            Select::Press(clicks) => selection::Phase::Down(clicks),
+            Select::Drag => selection::Phase::Move,
+            Select::Release => selection::Phase::Up,
+            Select::Clear => selection::Phase::Clear,
+            Select::All => selection::Phase::All,
+        };
+        // A release ends the gesture where it last was; one with no gesture does nothing.
+        let input = match (step, *last) {
+            (Select::Release | Select::Drag, None) => return None,
+            (Select::Release, Some(mut input)) => {
+                input.phase = phase;
+                input
+            }
+            _ => {
+                // Ghostty picks the half of a cell from a whole-pixel cell width.
+                let width = at.cell_width.ceil().max(1.0);
+                selection::Input {
+                    generation,
+                    revision: 0,
+                    phase,
+                    at: at.cell,
+                    position: (f64::from(at.position.0 * width / at.cell_width.max(1.0)), f64::from(at.position.1)),
+                    geometry: selection::Geometry {
+                        columns: u32::from(cols),
+                        cell_width: width as u32,
+                        padding_left: 0,
+                        screen_height: at.height.ceil().max(1.0) as u32,
+                    },
+                }
+            }
+        };
+        *revision += 1;
+        let input = selection::Input { revision: *revision, ..input };
+        *last = matches!(step, Select::Press(_) | Select::Drag).then_some(input);
+        let revision = *revision;
+        drop(selections);
+        self.terminal(block, Command::Selection(input));
+        Some(revision)
+    }
+    /// Clears a live pane's screen and scrollback for every device, keeping the current line.
+    /// The program keeps running. Not input: it takes no size. Dropped if the pane is not live.
+    pub fn clear(&self, block: &str) {
+        let live = {
+            let m = self.core.model.lock().expect("host model");
+            m.connected
+                && m.terminals.get(block).is_some_and(|c| {
+                    let t = c.model.lock().expect("terminal model");
+                    t.connected && t.control_connected
+                })
+        };
+        if live && self.input.state.live() {
+            self.terminal(block, Command::Clear);
+        }
+    }
     fn predict(&self, block: &str, act: impl FnOnce(&mut Predictor)) {
         act(self.predictors.lock().expect("predictors").entry(block.to_owned()).or_default());
     }
@@ -327,6 +454,13 @@ impl Host {
         self.send(HostCommand::Close {
             kind: HumanClose::Tab,
             payload: json!({"session_id": session, "window_id": window}),
+        });
+    }
+    /// Ends the program in one pane. Only on a confirmed, explicit request; sent once.
+    pub fn close_pane(&self, session: &str, block: &str) {
+        self.send(HostCommand::Close {
+            kind: HumanClose::Pane,
+            payload: json!({"session_id": session, "block_id": block}),
         });
     }
     /// Names a tab for every device; an empty name gives it its default title back.
@@ -482,6 +616,7 @@ mod tests {
             navigation: Mutex::new(0),
             asked: Mutex::default(),
             predictors: Mutex::default(),
+            selections: Mutex::default(),
         };
         host.snapshot();
         (host, sent, typed)
@@ -555,6 +690,68 @@ mod tests {
         assert_eq!(asked.len(), 1);
         assert_eq!(asked[0]["mode"], "request");
         assert!(typed.try_recv().is_ok());
+    }
+
+    fn pointer(x: u16, y: u16) -> Pointer {
+        Pointer { cell: (x, y), position: (f32::from(x) * 8.0, f32::from(y) * 18.0), cell_width: 8.0, height: 360.0 }
+    }
+
+    #[test]
+    fn selecting_stays_on_this_client_and_counts_its_steps() {
+        let (host, sent, mut typed) = intercepted(Some("client:mac"), true);
+        assert_eq!(host.selection("block:1", Select::Release, pointer(0, 0)), None, "no gesture to end");
+        assert_eq!(host.selection("block:1", Select::Press(2), pointer(3, 1)), Some(1));
+        assert_eq!(host.selection("block:1", Select::Drag, pointer(9, 2)), Some(2));
+        assert_eq!(host.selection("block:1", Select::Release, pointer(40, 9)), Some(3));
+        assert_eq!(host.selection("block:1", Select::Release, pointer(0, 0)), None, "it has ended");
+        assert_eq!(host.selection("block:1", Select::All, pointer(0, 0)), Some(4));
+        assert_eq!(host.selection("block:9", Select::Press(1), pointer(0, 0)), None, "no such pane");
+        let steps: Vec<_> = sent
+            .try_iter()
+            .map(|c| match c {
+                HostCommand::Terminal { block, command: Command::Selection(i), .. } => {
+                    assert_eq!(block, "block:1");
+                    (i.revision, i.at)
+                }
+                _ => panic!("a selection asks the server for nothing"),
+            })
+            .collect();
+        // A release ends where the drag last was, not where the pointer let go.
+        assert_eq!(steps, [(1, (3, 1)), (2, (9, 2)), (3, (9, 2)), (4, (0, 0))]);
+        assert!(typed.try_recv().is_err());
+    }
+
+    #[test]
+    fn mouse_reports_never_take_a_pane_and_only_a_press_asks_for_one() {
+        let (host, sent, mut typed) = intercepted(Some("client:mac"), true);
+        host.mouse("block:1", Mouse::Press(Button::Left), (2, 3), "ctrl");
+        host.mouse("block:1", Mouse::Drag(Button::Left), (4, 3), "");
+        host.mouse("block:1", Mouse::Release(Button::Left), (4, 3), "");
+        let mut actions = Vec::new();
+        while let Ok(Outgoing { method, payload, .. }) = typed.try_recv() {
+            assert_eq!(method, "block.event");
+            assert_eq!(payload["event"]["type"], "mouse");
+            actions.push(payload["event"]["payload"]["action"].as_str().unwrap().to_owned());
+        }
+        assert_eq!(actions, ["press", "motion", "release"]);
+        assert!(sent.try_iter().all(|c| matches!(c, HostCommand::Terminal { command: Command::Scroll(_), .. })));
+
+        let (host, sent, _typed) = intercepted(None, true);
+        host.mouse("block:1", Mouse::Drag(Button::Left), (4, 3), "");
+        assert!(sent.try_recv().is_err(), "motion asks for nothing");
+        host.mouse("block:1", Mouse::Press(Button::Left), (4, 3), "");
+        assert!(sent.try_iter().any(|c| matches!(c, HostCommand::Request { method, .. } if method == "session.own_block")));
+    }
+
+    #[test]
+    fn clearing_reaches_only_a_live_pane() {
+        let (host, sent, _typed) = intercepted(None, false);
+        host.clear("block:1");
+        host.mouse("block:1", Mouse::Press(Button::Left), (0, 0), "");
+        assert!(sent.try_recv().is_err());
+        let (host, sent, _typed) = intercepted(Some("client:mac"), true);
+        host.clear("block:1");
+        assert!(matches!(sent.try_recv().unwrap(), HostCommand::Terminal { command: Command::Clear, .. }));
     }
 
     #[test]
