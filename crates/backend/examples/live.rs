@@ -291,7 +291,36 @@ fn tabs(host: &Host, block: &str, session: &str) -> Check {
     pass("a tab renamed from here is renamed on the server");
     host.close_tab(session, &new.id);
     until("the tab to close", 15, || (host.snapshot().tabs == first).then_some(()))?;
-    ensure(host.snapshot().sessions.iter().any(|s| s.id == session), "closing a tab closes only that tab")
+    ensure(host.snapshot().sessions.iter().any(|s| s.id == session), "closing a tab closes only that tab")?;
+    sessions(host, session)
+}
+
+/// The throwaway session renamed, then moved to each end of the list. Every other session keeps
+/// its name and its order among the rest.
+fn sessions(host: &Host, session: &str) -> Check {
+    let others = |s: &Snapshot| -> Vec<(String, String)> {
+        s.sessions.iter().filter(|x| x.id != session).map(|x| (x.id.clone(), x.label.clone())).collect()
+    };
+    let before = others(&host.snapshot());
+    let renamed = format!("{session}-renamed");
+    host.rename_session(session, &renamed);
+    until("the session's new name", 15, || {
+        host.snapshot().sessions.iter().any(|s| s.id == session && s.label == renamed).then_some(())
+    })?;
+    pass("a session renamed from here is renamed on the server");
+    if before.is_empty() {
+        println!("NOTE  no other session to move past");
+        return Ok(());
+    }
+    let place = || host.snapshot().sessions.iter().position(|s| s.id == session);
+    let count = before.len() + 1;
+    host.move_session(session, count);
+    until("the session to move to the end", 15, || (place() == Some(count - 1)).then_some(()))?;
+    host.move_session(session, 0);
+    until("the session to move to the top", 15, || (place() == Some(0)).then_some(()))?;
+    ensure(others(&host.snapshot()) == before, "moving a session leaves the others as they were")?;
+    pass("a session moved from here moves on the server");
+    Ok(())
 }
 
 fn main() {

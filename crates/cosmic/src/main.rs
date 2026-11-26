@@ -2,6 +2,7 @@
 mod claim;
 mod grid;
 mod keys;
+mod reorder;
 mod ui;
 
 use cosmic::{
@@ -98,6 +99,13 @@ enum Message {
     /// The close question has been readable for a moment.
     DialogArmed(u64),
     Surface(cosmic::surface::Action<Message>),
+    /// A session's menu opened, on this box: its commands act on this session.
+    SessionMenu(String, String),
+    SessionCommand(ui::SessionCommand),
+    /// Put the session at this slot in its box's list: 0 is the top.
+    MoveSession { id: String, session: String, slot: usize },
+    CloseSession { id: String, session: String },
+    RenameSession,
     OpenAgent(String, String, String),
     Pasted(String, String, Option<String>),
     ToggleInbox,
@@ -142,6 +150,9 @@ enum Dialog {
     /// Ends programs, so it asks, and Close stays inert until `armed`.
     CloseTab { config: BoxConfig, session: String, window: String, label: String, number: u64, armed: bool },
     Rename { config: BoxConfig, session: String, window: String, label: String },
+    /// Ends every tab in the session, so it asks, and Close stays inert until `armed`.
+    CloseSession { config: BoxConfig, session: String, label: String, tabs: Option<usize>, number: u64, armed: bool },
+    RenameSession { config: BoxConfig, session: String, label: String },
 }
 
 /// An open answer sheet. Results carry its number, so a late one can't land in another sheet.
@@ -178,6 +189,8 @@ struct App {
     /// The tab whose right-click menu opened last.
     menu_tab: Option<String>,
     hovered_tab: Option<String>,
+    /// The box and session whose right-click menu opened last.
+    menu_session: Option<(String, String)>,
     started: Instant,
 }
 
@@ -404,6 +417,7 @@ impl Application for App {
             sheets: 0,
             menu_tab: None,
             hovered_tab: None,
+            menu_session: None,
             started: Instant::now(),
             core,
             args,
@@ -538,6 +552,37 @@ impl Application for App {
                         .on_submit(|_| Message::RenameTab),
                 )
                 .primary_action(widget::button::suggested("Rename").on_press(Message::RenameTab))
+                .secondary_action(cancel())
+                .into(),
+            Dialog::CloseSession { config, session, label, tabs, armed, .. } => widget::dialog()
+                .title(format!("Close session \u{2018}{label}\u{2019} on {}?", config.label))
+                .body(format!(
+                    "Ends every program in {} on {}, for every device viewing it. Closing this window instead ends nothing.",
+                    match tabs {
+                        Some(1) => "its one tab".to_owned(),
+                        Some(n) => format!("its {n} tabs"),
+                        None => "all its tabs".to_owned(),
+                    },
+                    config.label
+                ))
+                .primary_action(widget::button::suggested("Keep running").on_press(Message::CancelDialog))
+                .secondary_action(widget::button::destructive("Close session").on_press_maybe(
+                    armed.then(|| Message::CloseSession { id: config.id.clone(), session: session.clone() }),
+                ))
+                .into(),
+            Dialog::RenameSession { config, label, .. } => widget::dialog()
+                .title("Rename session")
+                .body(format!("Every device viewing {} sees the new name.", config.label))
+                .control(
+                    widget::text_input("Session name", label.as_str())
+                        .label("Name")
+                        .on_input(Message::RenameDraft)
+                        .on_submit(|_| Message::RenameSession),
+                )
+                .primary_action(
+                    widget::button::suggested("Rename")
+                        .on_press_maybe((!label.trim().is_empty()).then_some(Message::RenameSession)),
+                )
                 .secondary_action(cancel())
                 .into(),
             Dialog::Remove(config) => widget::dialog()
@@ -711,10 +756,68 @@ impl Application for App {
                 });
             }
             Message::DialogArmed(n) => {
-                if let Some(Dialog::CloseTab { number, armed, .. }) = &mut self.dialog
+                if let Some(
+                    Dialog::CloseTab { number, armed, .. } | Dialog::CloseSession { number, armed, .. },
+                ) = &mut self.dialog
                     && *number == n
                 {
                     *armed = true;
+                }
+            }
+            Message::SessionMenu(id, session) => self.menu_session = Some((id, session)),
+            Message::SessionCommand(command) => {
+                let Some((id, session)) = self.menu_session.clone() else { return Task::none() };
+                let (Some(config), Some(now)) = (self.boxes.config(&id), self.snapshot(&id)) else {
+                    return Task::none();
+                };
+                let Some(index) = now.sessions.iter().position(|s| s.id == session) else {
+                    return Task::none();
+                };
+                let label = now.sessions[index].label.clone();
+                match command {
+                    ui::SessionCommand::Open => return self.update(Message::OpenSession(id, session)),
+                    ui::SessionCommand::MoveUp if index > 0 => {
+                        return self.update(Message::MoveSession { id, session, slot: index - 1 });
+                    }
+                    ui::SessionCommand::MoveDown => {
+                        return self.update(Message::MoveSession { id, session, slot: index + 2 });
+                    }
+                    ui::SessionCommand::MoveUp => {}
+                    ui::SessionCommand::Rename => {
+                        self.dialog = Some(Dialog::RenameSession { config: config.clone(), session, label });
+                    }
+                    ui::SessionCommand::Close => {
+                        // Only the session on screen has its tabs known here.
+                        let tabs = (now.session.as_ref() == Some(&session)).then_some(now.tabs.len());
+                        let config = config.clone();
+                        self.sheets += 1;
+                        let number = self.sheets;
+                        self.dialog = Some(Dialog::CloseSession { config, session, label, tabs, number, armed: false });
+                        return Task::perform(rex_backend::pause(Duration::from_millis(300)), move |()| {
+                            cosmic::Action::App(Message::DialogArmed(number))
+                        });
+                    }
+                }
+            }
+            Message::MoveSession { id, session, slot } => {
+                if let Some(host) = self.boxes.host(&id) {
+                    host.move_session(&session, slot);
+                }
+            }
+            Message::CloseSession { id, session } => {
+                self.dialog = None;
+                if let Some(host) = self.boxes.host(&id) {
+                    host.close_session(&session);
+                }
+            }
+            Message::RenameSession => {
+                if let Some(Dialog::RenameSession { config, session, label }) = &self.dialog
+                    && !label.trim().is_empty()
+                {
+                    if let Some(host) = self.boxes.host(&config.id) {
+                        host.rename_session(session, label.trim());
+                    }
+                    self.dialog = None;
                 }
             }
             Message::CloseTab { id, session, window } => {
@@ -724,7 +827,7 @@ impl Application for App {
                 }
             }
             Message::RenameDraft(text) => {
-                if let Some(Dialog::Rename { label, .. }) = &mut self.dialog {
+                if let Some(Dialog::Rename { label, .. } | Dialog::RenameSession { label, .. }) = &mut self.dialog {
                     *label = text;
                 }
             }

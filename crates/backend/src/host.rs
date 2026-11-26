@@ -336,6 +336,33 @@ impl Host {
             payload: json!({"session_id": session, "window_id": window, "label": label}),
         });
     }
+    /// Ends every program in every tab of the session. Only on a confirmed, explicit request.
+    pub fn close_session(&self, session: &str) {
+        self.send(HostCommand::Close {
+            kind: HumanClose::Session,
+            payload: json!({"session_id": session}),
+        });
+    }
+    /// Names a session for every device. The server keeps the old name for an empty one.
+    pub fn rename_session(&self, session: &str, label: &str) {
+        self.send(HostCommand::Request {
+            method: "session.set_label".into(),
+            payload: json!({"session_id": session, "label": label}),
+        });
+    }
+    /// Moves a session to `slot` in the box's list, as last seen: 0 is the top, the list's
+    /// length the end. The order is the server's, so every device sees it.
+    pub fn move_session(&self, session: &str, slot: usize) {
+        let sessions = self.snapshot().sessions;
+        let order: Vec<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+        let Some(from) = order.iter().position(|id| *id == session) else { return };
+        let Some(before) = move_before(&order, from, slot) else { return };
+        let mut payload = json!({"session_id": session});
+        if let Some(before) = before {
+            payload["before_session_id"] = json!(before);
+        }
+        self.send(HostCommand::Request { method: "session.move".into(), payload });
+    }
     pub fn split(&self, session: &str, block: &str, split: Split) {
         self.send(HostCommand::NewTerminal {
             method: "session.new_split".into(),
@@ -352,11 +379,34 @@ impl Host {
     }
 }
 
+/// Where `session.move` should put the session at `from` so it lands at `slot`: before the
+/// session given, or at the end for `Some(None)`. `None` when it would not move.
+fn move_before<'a>(order: &[&'a str], from: usize, slot: usize) -> Option<Option<&'a str>> {
+    if from >= order.len() || slot > order.len() || slot == from || slot == from + 1 {
+        return None;
+    }
+    Some(order.get(slot).copied())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::input::Outgoing;
     use tokio::sync::mpsc::UnboundedReceiver;
+
+    #[test]
+    fn moving_a_session_names_the_one_it_goes_before() {
+        let order = ["a", "b", "c"];
+        assert_eq!(move_before(&order, 2, 0), Some(Some("a")));
+        assert_eq!(move_before(&order, 0, 2), Some(Some("c")));
+        assert_eq!(move_before(&order, 0, 3), Some(None));
+        // Its own slot or the one just after it: it stays where it is.
+        assert_eq!(move_before(&order, 1, 1), None);
+        assert_eq!(move_before(&order, 1, 2), None);
+        assert_eq!(move_before(&order, 2, 3), None);
+        assert_eq!(move_before(&order, 0, 4), None);
+        assert_eq!(move_before(&order, 3, 0), None);
+    }
 
     #[test]
     fn key_payload_matches_the_documented_shape() {

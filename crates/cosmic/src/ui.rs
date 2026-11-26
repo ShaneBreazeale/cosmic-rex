@@ -330,6 +330,43 @@ pub fn elapsed(d: std::time::Duration) -> String {
     }
 }
 
+/// What a session's right-click menu can do. It acts on the session whose menu opened last.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SessionCommand {
+    Open,
+    Rename,
+    MoveUp,
+    MoveDown,
+    Close,
+}
+
+impl widget::menu::Action for SessionCommand {
+    type Message = Message;
+    fn message(&self) -> Message {
+        Message::SessionCommand(*self)
+    }
+}
+
+/// The menu for the session at `index` of `count`: it can't move past either end.
+fn session_menu(index: usize, count: usize) -> Vec<widget::menu::Tree<Message>> {
+    use widget::menu::Item;
+    let step = |can: bool, label, command| {
+        if can { Item::Button(label, None, command) } else { Item::ButtonDisabled(label, None, command) }
+    };
+    widget::menu::items(
+        &std::collections::HashMap::new(),
+        vec![
+            Item::Button("Open", None, SessionCommand::Open),
+            Item::Button("Rename…", None, SessionCommand::Rename),
+            Item::Divider,
+            step(index > 0, "Move up", SessionCommand::MoveUp),
+            step(index + 1 < count, "Move down", SessionCommand::MoveDown),
+            Item::Divider,
+            Item::Button("Close session…", None, SessionCommand::Close),
+        ],
+    )
+}
+
 pub struct BoxRow<'a> {
     pub config: &'a BoxConfig,
     /// None while this box is disconnected by choice.
@@ -375,7 +412,9 @@ pub fn sidebar<'a>(rows: Vec<BoxRow<'a>>, current: Option<&str>) -> Element<'a, 
         if !online && !now.status.is_empty() {
             list = list.push(widget::container(muted(now.status.as_str())).padding([0, 8, 4, 40]));
         }
-        for s in &now.sessions {
+        let count = now.sessions.len();
+        let mut sessions = Vec::with_capacity(count);
+        for (i, s) in now.sessions.iter().enumerate() {
             let selected = online
                 && current == Some(id.as_str())
                 && now.session.as_deref() == Some(s.id.as_str());
@@ -401,14 +440,26 @@ pub fn sidebar<'a>(rows: Vec<BoxRow<'a>>, current: Option<&str>) -> Element<'a, 
                 .align_y(Alignment::Center)
                 .push(status(s.state))
                 .push(lines.width(Length::Fill));
-            // Sessions of an unreachable box are what was last seen, and can't be opened.
-            list = list.push(
-                widget::button::custom(line.padding([2, 2, 2, 6]))
-                    .width(Length::Fill)
-                    .class(row_class(selected))
-                    .on_press_maybe(online.then(|| Message::OpenSession(id.clone(), s.id.clone()))),
-            );
+            // Sessions of an unreachable box are what was last seen, and can't be opened or changed.
+            let button = widget::button::custom(line.padding([2, 2, 2, 6]))
+                .width(Length::Fill)
+                .class(row_class(selected))
+                .on_press_maybe(online.then(|| Message::OpenSession(id.clone(), s.id.clone())));
+            sessions.push(if online {
+                widget::context_menu(button, Some(session_menu(i, count)))
+                    .on_open(Message::SessionMenu(id.clone(), s.id.clone()))
+                    .on_surface_action(Message::Surface)
+                    .into()
+            } else {
+                button.into()
+            });
         }
+        let on_move = (online && count > 1).then(|| {
+            let (id, order): (String, Vec<String>) =
+                (id.clone(), now.sessions.iter().map(|s| s.id.clone()).collect());
+            move |row: usize, slot: usize| Message::MoveSession { id: id.clone(), session: order[row].clone(), slot }
+        });
+        list = list.push(crate::reorder::reorder(sessions, on_move));
         if online && now.sessions.is_empty() {
             list = list.push(widget::container(muted("No sessions")).padding([2, 8, 6, 40]));
         }
