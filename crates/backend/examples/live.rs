@@ -120,7 +120,7 @@ fn quote(s: &str) -> String {
 }
 
 fn answers(host: &Host, block: &str, session: &str) -> Check {
-    let q = || block_on(host.asker().question(session.to_owned(), block.to_owned()));
+    let q = || block_on(host.asker().expect("a Rex server").question(session.to_owned(), block.to_owned()));
     ask(host, block, 1, false)?;
     let question = q()?;
     ensure(
@@ -128,11 +128,11 @@ fn answers(host: &Host, block: &str, session: &str) -> Check {
         "a question is read with its screen, without attaching",
     )?;
     let t = Instant::now();
-    let outcome = block_on(host.asker().answer(question.ticket.clone(), Reply::Line("yes please".into())));
+    let outcome = block_on(host.asker().expect("a Rex server").answer(question.ticket.clone(), Reply::Line("yes please".into())));
     println!("      answered in {} ms: {outcome:?}", t.elapsed().as_millis());
     ensure(outcome == Outcome::Reacted, "an answered program reacts")?;
     until("the answer on screen", 10, || screen(&host.snapshot()).contains("got-1-yes please").then_some(()))?;
-    let again = block_on(host.asker().answer(question.ticket, Reply::Key(AnswerKey::Enter)));
+    let again = block_on(host.asker().expect("a Rex server").answer(question.ticket, Reply::Key(AnswerKey::Enter)));
     ensure(again == Outcome::Changed, "the same question can't be answered twice")?;
     std::thread::sleep(Duration::from_secs(3));
 
@@ -141,11 +141,11 @@ fn answers(host: &Host, block: &str, session: &str) -> Check {
     until("the program to change its question", 15, || {
         host.snapshot().agents.iter().any(|a| a.block == block && a.message.as_deref() == Some("B?")).then_some(())
     })?;
-    let stale = block_on(host.asker().answer(question.ticket, Reply::Line("WRONG".into())));
+    let stale = block_on(host.asker().expect("a Rex server").answer(question.ticket, Reply::Line("WRONG".into())));
     ensure(stale == Outcome::Changed, "an answer to a replaced question is refused")?;
     std::thread::sleep(Duration::from_secs(1));
     ensure(!screen(&host.snapshot()).contains("WRONG"), "and nothing of it was typed")?;
-    let outcome = block_on(host.asker().answer(q()?.ticket, Reply::Line("right".into())));
+    let outcome = block_on(host.asker().expect("a Rex server").answer(q()?.ticket, Reply::Line("right".into())));
     ensure(outcome == Outcome::Reacted, "the new question can be answered")?;
     std::thread::sleep(Duration::from_secs(3));
     ensure(
@@ -390,7 +390,7 @@ fn main() {
             std::process::exit(1);
         }
     };
-    println!("      connected and session created in {} ms, API {}", start.elapsed().as_millis(), mac.model.lock().unwrap().protocol.api_revision);
+    println!("      connected and session created in {} ms, API {}", start.elapsed().as_millis(), mac.model.lock().unwrap().protocol.api_revision.map_or("not reported".into(), |r| r.to_string()));
     let others: BTreeSet<String> = ids().into_iter().filter(|i| *i != session).collect();
     let mut result = (|| {
         let _ = mac.commands.send(HostCommand::Select(session.clone()));

@@ -1,4 +1,4 @@
-//! One connected Rex server.
+//! One box: a connected Rex server, or shells on this computer.
 use crate::{Size, Snapshot, input::Input, model::size, predict::Predictor};
 use rex_rune::{
     connection::{
@@ -121,7 +121,164 @@ pub enum Mouse {
     Release(Button),
 }
 
-pub struct Host {
+/// A box's sessions and terminals: a Rex server's, or this app's own shells on this computer.
+pub struct Host(Kind);
+
+enum Kind {
+    Rex(Remote),
+    Local(crate::local::Local),
+}
+
+/// Calls the method of the same name on whichever kind of box this is.
+macro_rules! both {
+    ($($(#[$doc:meta])* fn $name:ident(&self $(, $arg:ident: $ty:ty)*) $(-> $ret:ty)?;)*) => {$(
+        $(#[$doc])*
+        pub fn $name(&self $(, $arg: $ty)*) $(-> $ret)? {
+            match &self.0 {
+                Kind::Rex(h) => h.$name($($arg),*),
+                Kind::Local(h) => h.$name($($arg),*),
+            }
+        }
+    )*};
+}
+
+impl Host {
+    /// Connect in the background and keep reconnecting; for [`crate::boxes::LOCAL`], run shells
+    /// here instead. Never starts or stops a server, and never creates or destroys a session on
+    /// one.
+    pub fn connect(endpoint: String, session: Option<String>) -> Self {
+        if endpoint == crate::boxes::LOCAL {
+            return Self(Kind::Local(crate::local::Local::start(next_serial())));
+        }
+        Self(Kind::Rex(Remote::connect(endpoint, session)))
+    }
+    /// Its shells run in this app and end with it; there is no server.
+    pub fn is_local(&self) -> bool {
+        matches!(self.0, Kind::Local(_))
+    }
+    /// For reading and answering a program's question, in any session on this box. Only a Rex
+    /// server reads programs' questions.
+    pub fn asker(&self) -> Option<crate::Asker> {
+        match &self.0 {
+            Kind::Rex(h) => Some(h.asker()),
+            Kind::Local(_) => None,
+        }
+    }
+    /// A new session with one shell. Only on this computer; a Rex server's sessions are made
+    /// elsewhere.
+    pub fn new_session(&self) {
+        if let Kind::Local(h) = &self.0 {
+            h.new_session();
+        }
+    }
+    /// Take this pane's size, on the person's explicit request: every client viewing it re-wraps.
+    /// Local panes always have this window's size.
+    pub fn fit_here(&self, session: &str, block: &str) {
+        if let Kind::Rex(h) = &self.0 {
+            h.fit_here(session, block);
+        }
+    }
+    pub fn reconnect(&self) {
+        if let Kind::Rex(h) = &self.0 {
+            h.reconnect();
+        }
+    }
+    both! {
+        fn snapshot(&self) -> Snapshot;
+        fn wakes(&self) -> Vec<Wake>;
+        /// Typing. Dropped, never queued, if the pane is not live.
+        fn key(&self, block: &str, key: &Key);
+        fn paste(&self, block: &str, text: String);
+        /// Report the pointer to a program that tracks the mouse.
+        fn mouse(&self, block: &str, mouse: Mouse, cell: (u16, u16), mods: &str);
+        /// One step of a selection in this pane, made by this client on its own copy of the
+        /// screen. Its text comes with the first frame whose `selection_revision` is the one
+        /// returned.
+        fn selection(&self, block: &str, step: Select, at: Pointer) -> Option<u64>;
+        /// Empties a live pane's screen and scrollback, keeping the current line. The program
+        /// keeps running.
+        fn clear(&self, block: &str);
+        /// Draw this box's terminals, or only keep its sessions and statuses current.
+        fn set_visible(&self, visible: bool);
+        /// Local viewport lines; negative is up.
+        fn scroll(&self, block: &str, lines: isize);
+        /// Wheel lines for a program that tracks the mouse; negative is up.
+        fn wheel(&self, block: &str, x: u16, y: u16, lines: i32);
+        /// This window's size for a pane it sizes. Ignored for any other.
+        fn resize(&self, block: &str, cols: u16, rows: u16, cell: (u16, u16));
+        fn focus(&self, block: &str);
+        fn select(&self, session: String);
+        fn open(&self, session: String, window: Option<String>);
+        fn zoom(&self, session: &str, block: &str);
+        /// A new tab, starting in `block`'s directory.
+        fn new_tab(&self, session: &str, block: &str);
+        /// Ends every program in the tab. Only on a confirmed, explicit request; sent once.
+        fn close_tab(&self, session: &str, window: &str);
+        /// Ends the program in one pane. Only on a confirmed, explicit request; sent once.
+        fn close_pane(&self, session: &str, block: &str);
+        /// Names a tab; an empty name gives it its default title back.
+        fn rename_tab(&self, session: &str, window: &str, label: &str);
+        /// Ends every program in every tab of the session. Only on a confirmed, explicit request.
+        fn close_session(&self, session: &str);
+        /// Names a session. An empty name keeps the old one.
+        fn rename_session(&self, session: &str, label: &str);
+        /// Moves a session to `slot` in the box's list: 0 is the top, the list's length the end.
+        fn move_session(&self, session: &str, slot: usize);
+        fn split(&self, session: &str, block: &str, split: Split);
+    }
+}
+
+/// One step of a pointer selection as the core's selection controller takes it, numbered after
+/// the pane's last one. `None` when it continues a gesture that has ended.
+pub(crate) fn selection_step(
+    selections: &Mutex<HashMap<String, (u64, Option<selection::Input>)>>,
+    block: &str,
+    step: Select,
+    at: Pointer,
+    generation: u64,
+    cols: u16,
+) -> Option<selection::Input> {
+    let mut selections = selections.lock().expect("selections");
+    let (revision, last) = selections.entry(block.to_owned()).or_default();
+    let phase = match step {
+        Select::Press(clicks) => selection::Phase::Down(clicks),
+        Select::Drag => selection::Phase::Move,
+        Select::Release => selection::Phase::Up,
+        Select::Clear => selection::Phase::Clear,
+        Select::All => selection::Phase::All,
+    };
+    // A release ends the gesture where it last was; one with no gesture does nothing.
+    let input = match (step, *last) {
+        (Select::Release | Select::Drag, None) => return None,
+        (Select::Release, Some(mut input)) => {
+            input.phase = phase;
+            input
+        }
+        _ => {
+            // Ghostty picks the half of a cell from a whole-pixel cell width.
+            let width = at.cell_width.ceil().max(1.0);
+            selection::Input {
+                generation,
+                revision: 0,
+                phase,
+                at: at.cell,
+                position: (f64::from(at.position.0 * width / at.cell_width.max(1.0)), f64::from(at.position.1)),
+                geometry: selection::Geometry {
+                    columns: u32::from(cols),
+                    cell_width: width as u32,
+                    padding_left: 0,
+                    screen_height: at.height.ceil().max(1.0) as u32,
+                },
+            }
+        }
+    };
+    *revision += 1;
+    let input = selection::Input { revision: *revision, ..input };
+    *last = matches!(step, Select::Press(_) | Select::Drag).then_some(input);
+    Some(input)
+}
+
+struct Remote {
     /// Distinguishes this connection's wakes from an earlier one to the same box.
     serial: u64,
     core: HostConnection,
@@ -141,10 +298,8 @@ fn next_serial() -> u64 {
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-impl Host {
-    /// Connect in the background and keep reconnecting. Never starts or stops a server, and
-    /// never creates or destroys a session.
-    pub fn connect(endpoint: String, session: Option<String>) -> Self {
+impl Remote {
+    fn connect(endpoint: String, session: Option<String>) -> Self {
         let core = HostConnection::spawn(endpoint.clone(), session, None, None, true, None);
         let input = Input::spawn(endpoint, core.model.clone());
         Self {
@@ -307,45 +462,8 @@ impl Host {
             let t = terminals.get(block)?.model.lock().expect("terminal model");
             (t.restore_generation, t.frame.as_ref().map_or(1, |f| f.cols))
         };
-        let mut selections = self.selections.lock().expect("selections");
-        let (revision, last) = selections.entry(block.to_owned()).or_default();
-        let phase = match step {
-            Select::Press(clicks) => selection::Phase::Down(clicks),
-            Select::Drag => selection::Phase::Move,
-            Select::Release => selection::Phase::Up,
-            Select::Clear => selection::Phase::Clear,
-            Select::All => selection::Phase::All,
-        };
-        // A release ends the gesture where it last was; one with no gesture does nothing.
-        let input = match (step, *last) {
-            (Select::Release | Select::Drag, None) => return None,
-            (Select::Release, Some(mut input)) => {
-                input.phase = phase;
-                input
-            }
-            _ => {
-                // Ghostty picks the half of a cell from a whole-pixel cell width.
-                let width = at.cell_width.ceil().max(1.0);
-                selection::Input {
-                    generation,
-                    revision: 0,
-                    phase,
-                    at: at.cell,
-                    position: (f64::from(at.position.0 * width / at.cell_width.max(1.0)), f64::from(at.position.1)),
-                    geometry: selection::Geometry {
-                        columns: u32::from(cols),
-                        cell_width: width as u32,
-                        padding_left: 0,
-                        screen_height: at.height.ceil().max(1.0) as u32,
-                    },
-                }
-            }
-        };
-        *revision += 1;
-        let input = selection::Input { revision: *revision, ..input };
-        *last = matches!(step, Select::Press(_) | Select::Drag).then_some(input);
-        let revision = *revision;
-        drop(selections);
+        let input = selection_step(&self.selections, block, step, at, generation, cols)?;
+        let revision = input.revision;
         self.terminal(block, Command::Selection(input));
         Some(revision)
     }
@@ -574,7 +692,7 @@ mod tests {
     fn intercepted(
         owner: Option<&str>,
         live: bool,
-    ) -> (Host, flume::Receiver<HostCommand>, UnboundedReceiver<Outgoing>) {
+    ) -> (Remote, flume::Receiver<HostCommand>, UnboundedReceiver<Outgoing>) {
         use rex_rune::connection::{HostModel, TerminalSender};
         let (commands, sent) = flume::unbounded();
         let (_, wake) = flume::bounded(1);
@@ -608,7 +726,7 @@ mod tests {
         );
         let core = HostConnection { model: Arc::new(Mutex::new(m)), commands, wake };
         let (input, typed) = Input::intercepted(true);
-        let host = Host {
+        let host = Remote {
             serial: next_serial(),
             core,
             input,

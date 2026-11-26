@@ -20,6 +20,8 @@ An unofficial [Rex](https://www.superlogical.com/rex) client for the COSMIC desk
 
 - **This computer's shells,** with no Rex server: choose "Use this computer" when adding a box, or enter `local` as the address. They have tabs and splits like any other box, and end when the app closes.
 - **Local echo** draws typing before the server confirms it, underlined until it does.
+- **Minimum contrast,** as in Ghostty: View → Minimum contrast moves text that is too close to its background toward black or white until it reaches 3:1, 4.5:1 or 7:1, keeping its hue. It is saved between runs.
+- **Nerd Font icons** in prompts and status lines draw without installing anything: the app bundles Symbols Nerd Font Mono ([MIT](docs/licenses/nerd-fonts.txt), v3.4.0).
 
 ### Keys
 
@@ -45,11 +47,23 @@ To take a new rex-rune:
     scripts/update-backend.sh          # upstream's newest master
     scripts/update-backend.sh <sha>    # or a chosen revision
 
-It moves every pin together (rex-rune and the `rexrs` and `ghostty-vt` it patches), prints the upstream compare link, warns if upstream changed its own pins, then runs the backend and frontend tests. If they fail, the old pins are put back. If they pass, review the compare link and commit `Cargo.toml` and `Cargo.lock`. To try a patched core, point those three entries in the root `Cargo.toml` at a fork.
+    scripts/update-backend.sh --check  # only say whether upstream moved
+
+It moves every pin together (rex-rune and the `rexrs` and `ghostty-vt` it patches), prints the upstream compare link, warns if upstream changed its own pins, then runs clippy and all tests. If they fail, the old pins are put back. If they pass, review the compare link, run the live test against a throwaway session, and commit `Cargo.toml` and `Cargo.lock`. To try a patched core, point those three entries in the root `Cargo.toml` at a fork.
+
+## Install
+
+Pop!_OS and Ubuntu 24.04 or later: download `cosmic-rex_*_amd64.deb` from the [latest release](https://github.com/ShaneBreazeale/cosmic-rex/releases), then
+
+    sudo apt install ./cosmic-rex_*_amd64.deb
+
+Other distributions: the release's `cosmic-rex-*-x86_64-linux.tar.gz` holds the binary; run `cosmic-rex` from it.
+
+There is no Flatpak. A terminal runs your shells, ssh and tailscale on the host, so a sandbox would have to be opened all the way and would protect nothing.
 
 ## Build
 
-Pop!_OS 24.04: Rust 1.96+, Zig 0.17.1 on `PATH`, and `sudo apt install libxkbcommon-dev`.
+Pop!_OS 24.04: Rust 1.96+, `sudo apt install libxkbcommon-dev`, and Zig 0.17.1 on `PATH`. `scripts/fetch-zig.sh` puts a checked copy in `.toolchain/zig`; then `export PATH=$PWD/.toolchain/zig:$PATH`.
 
     cargo run --release                # your saved boxes
     cargo run --release -- --demo      # no server needed (--stress times drawing)

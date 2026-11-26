@@ -184,9 +184,16 @@ pub fn sample() -> (Vec<crate::BoxConfig>, Vec<(String, crate::Snapshot)>) {
         sessions: vec![session("backups", S::Idle)],
         ..Default::default()
     };
+    // This computer's own shells: no server, no agents.
+    let here = BoxConfig { endpoint: crate::LOCAL.into(), ..config(4, "This computer", "TH") };
+    let local = Snapshot {
+        connected: true,
+        sessions: vec![Session { about: "htop".into(), ..session("Shell", S::Idle) }],
+        ..Default::default()
+    };
     (
-        vec![config(1, "studio", "ST"), config(2, "forge", "FG"), config(3, "attic", "AT")],
-        vec![("box-1".into(), studio), ("box-2".into(), forge), ("box-3".into(), attic)],
+        vec![config(1, "studio", "ST"), config(2, "forge", "FG"), config(3, "attic", "AT"), here],
+        vec![("box-1".into(), studio), ("box-2".into(), forge), ("box-3".into(), attic), ("box-4".into(), local)],
     )
 }
 

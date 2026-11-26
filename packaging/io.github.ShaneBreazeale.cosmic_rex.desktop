@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Cosmic Rex
+GenericName=Rex Client
+Comment=Unofficial Rex client: terminals and an inbox for agents on your Rex servers
+Exec=cosmic-rex
+Icon=io.github.ShaneBreazeale.cosmic_rex
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=rex;terminal;ssh;agent;session;
+StartupWMClass=io.github.ShaneBreazeale.cosmic_rex

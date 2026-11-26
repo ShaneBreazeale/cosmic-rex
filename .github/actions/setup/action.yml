@@ -1,0 +1,20 @@
+name: Set up the build
+description: System libraries, Rust with clippy, the pinned Zig, and a cargo cache
+runs:
+  using: composite
+  steps:
+    - name: System libraries
+      shell: bash
+      run: |
+        sudo apt-get update -q
+        sudo apt-get install -yq --no-install-recommends \
+          pkg-config cmake libxkbcommon-dev libwayland-dev libfontconfig1-dev libfreetype-dev libexpat1-dev
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        components: clippy
+    - name: Zig
+      shell: bash
+      run: |
+        scripts/fetch-zig.sh
+        echo "$PWD/.toolchain/zig" >> "$GITHUB_PATH"
+    - uses: Swatinem/rust-cache@v2

@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.ShaneBreazeale.cosmic_rex</id>
+  <name>Cosmic Rex</name>
+  <summary>Unofficial Rex client for the COSMIC desktop</summary>
+  <developer id="io.github.shanebreazeale">
+    <name>Shane Breazeale</name>
+  </developer>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>An unofficial client for Rex servers, built for the COSMIC desktop. Not affiliated with Superlogical or System76.</p>
+    <ul>
+      <li>Boxes and their sessions in a sidebar, with tabs and split terminals</li>
+      <li>One inbox for agents: questions, approvals, errors and finished runs from every box</li>
+      <li>Answer an agent from the inbox, sent once and only if the question is still the same</li>
+      <li>Shells on this computer, with no Rex server</li>
+      <li>Local echo for typing on slow links</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">io.github.ShaneBreazeale.cosmic_rex.desktop</launchable>
+  <url type="homepage">https://github.com/ShaneBreazeale/cosmic-rex</url>
+  <url type="bugtracker">https://github.com/ShaneBreazeale/cosmic-rex/issues</url>
+  <url type="vcs-browser">https://github.com/ShaneBreazeale/cosmic-rex</url>
+  <screenshots>
+    <screenshot type="default">
+      <caption>Boxes and sessions, tabs, and split terminals</caption>
+      <image>https://raw.githubusercontent.com/ShaneBreazeale/cosmic-rex/main/docs/images/demo.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>The inbox beside a terminal</caption>
+      <image>https://raw.githubusercontent.com/ShaneBreazeale/cosmic-rex/main/docs/images/inbox.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Answering an agent's question</caption>
+      <image>https://raw.githubusercontent.com/ShaneBreazeale/cosmic-rex/main/docs/images/answer.png</image>
+    </screenshot>
+  </screenshots>
+  <content_rating type="oars-1.1"/>
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+  <releases>
+    <release version="0.1.0" date="2026-11-26">
+      <description><p>First pre-release.</p></description>
+    </release>
+  </releases>
+</component>

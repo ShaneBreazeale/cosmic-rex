@@ -1,0 +1,51 @@
+name: Release
+# A pushed tag vX.Y.Z builds the tarball and the .deb, with checksums, into a draft release. Publishing the
+# draft is done by hand. A tag with a hyphen (v0.2.0-rc1) becomes a pre-release.
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag matches the version
+        run: |
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          [ "$TAG" = "v$version" ] || [[ $TAG == v$version-* ]] \
+            || { echo "Tag $TAG does not match workspace version $version" >&2; exit 1; }
+      - uses: ./.github/actions/setup
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - run: cargo build --release --locked -p cosmic-rex
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb@3.8.0
+      - name: Package
+        run: |
+          name=cosmic-rex-$TAG-x86_64-linux
+          mkdir -p "dist/$name"
+          cp target/release/cosmic-rex LICENSE README.md "dist/$name/"
+          cp docs/licenses/rex-rune.txt "dist/$name/LICENSE-rex-rune.txt"
+          cp docs/licenses/nerd-fonts.txt "dist/$name/LICENSE-nerd-fonts.txt"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+          echo "NAME=$name" >> "$GITHUB_ENV"
+      - name: Debian package
+        run: |
+          # v0.2.0-rc1 becomes 0.2.0~rc1, which sorts before 0.2.0.
+          version=${TAG#v}
+          deb=$(cargo deb -p cosmic-rex --locked --no-build --deb-version "${version/-/\~}-1" -o dist/)
+          (cd dist && sha256sum "$(basename "$deb")" > "$(basename "$deb").sha256")
+          echo "DEB=$(basename "$deb")" >> "$GITHUB_ENV"
+      - name: Draft release
+        run: |
+          pre=; [[ $TAG == *-* ]] && pre=--prerelease
+          gh release create "$TAG" --draft $pre --verify-tag --generate-notes \
+            --title "cosmic-rex ${TAG#v}" \
+            "dist/$NAME.tar.gz" "dist/$NAME.tar.gz.sha256" "dist/$DEB" "dist/$DEB.sha256"

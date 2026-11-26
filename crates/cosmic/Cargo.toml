@@ -19,3 +19,28 @@ git = "https://github.com/pop-os/libcosmic.git"
 rev = "009fb9d4138f25615122c4ccc42d025472da9cdd"
 default-features = false
 features = ["winit", "tokio", "wayland", "wgpu", "multi-window", "xdg-portal"]
+
+# The .deb, built by `cargo deb -p cosmic-rex` (see docs/RELEASING.md). Linked libraries come from
+# dpkg-shlibdeps ($auto); Wayland, EGL and Vulkan are loaded at run time, so they are named here.
+# Asset paths are relative to this crate; target/release is the workspace's.
+[package.metadata.deb]
+maintainer = "Shane"
+copyright = "2026 Shane"
+license-file = ["../../LICENSE", "0"]
+extended-description = """\
+An unofficial client for Rex servers, built for the COSMIC desktop: boxes and their sessions, \
+tabs and split terminals, one inbox for agents, and shells on this computer. \
+Not affiliated with Superlogical or System76."""
+section = "x11"
+priority = "optional"
+depends = "$auto, libwayland-client0, libegl1"
+recommends = "libvulkan1, openssh-client"
+assets = [
+    ["target/release/cosmic-rex", "usr/bin/", "755"],
+    ["../../packaging/io.github.ShaneBreazeale.cosmic_rex.desktop", "usr/share/applications/", "644"],
+    ["../../packaging/io.github.ShaneBreazeale.cosmic_rex.metainfo.xml", "usr/share/metainfo/", "644"],
+    ["../../packaging/io.github.ShaneBreazeale.cosmic_rex.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
+    ["../../README.md", "usr/share/doc/cosmic-rex/", "644"],
+    ["../../docs/licenses/rex-rune.txt", "usr/share/doc/cosmic-rex/LICENSE-rex-rune.txt", "644"],
+    ["../../docs/licenses/nerd-fonts.txt", "usr/share/doc/cosmic-rex/LICENSE-nerd-fonts.txt", "644"],
+]

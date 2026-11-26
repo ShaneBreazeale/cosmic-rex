@@ -27,7 +27,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::keys;
+use crate::{contrast, keys};
 
 pub const PAD: f32 = 10.0;
 const HEADER: f32 = 34.0;
@@ -110,6 +110,25 @@ fn advance(fonts: &mut ct::FontSystem, size: f32) -> f32 {
         .unwrap_or(size * 0.6)
 }
 
+/// Nerd Fonts' icons, which prompts and status lines use and few installed fonts have. Each is
+/// shaped as its own piece at its own column (see `on_grid`), so its width never moves the text
+/// after it.
+static SYMBOLS: &[u8] = include_bytes!("../fonts/SymbolsNerdFontMono-Regular.ttf");
+
+const SYMBOLS_FAMILY: &str = "Symbols Nerd Font Mono";
+
+/// Nerd Fonts' icons all sit in Unicode's private use areas. Other installed fonts put their
+/// own glyphs there too (OpenSymbol has a few), so icons ask for the bundled font by name
+/// rather than taking whichever font fallback finds first.
+fn is_icon(text: &str) -> bool {
+    text.chars().next().is_some_and(|c| matches!(c, '\u{e000}'..='\u{f8ff}' | '\u{f0000}'..='\u{ffffd}'))
+}
+
+/// Makes the bundled fonts available to shaping. Once, before anything is measured.
+pub fn load_fonts() {
+    font_system().write().expect("font system").load_font(std::borrow::Cow::Borrowed(SYMBOLS));
+}
+
 fn attrs() -> ct::Attrs<'static> {
     ct::Attrs::new().family(ct::Family::Monospace)
 }
@@ -134,9 +153,16 @@ pub struct Cache {
     pub shaped: std::cell::Cell<u64>,
     /// Fitted metrics by base size, grid and pane size: measuring shapes text.
     fits: RefCell<HashMap<FitKey, Metrics>>,
+    /// The minimum contrast ratio text is drawn at; 1 draws colours as sent.
+    contrast: std::cell::Cell<f32>,
 }
 
 impl Cache {
+    /// Rows reshape at their next draw, since their hash takes the ratio in.
+    pub fn set_contrast(&self, ratio: f32) {
+        self.contrast.set(ratio);
+    }
+
     pub fn retain(&self, keep: impl Fn(&str) -> bool) {
         self.panes.borrow_mut().retain(|block, _| keep(block));
         self.guesses.borrow_mut().retain(|block, _| keep(block));
@@ -174,15 +200,16 @@ impl Cache {
         let rows = panes.entry(block.to_owned()).or_default();
         rows.truncate(frame.row_count());
         let mut fonts = None;
+        let contrast = self.contrast.get().max(1.0);
         for i in 0..frame.row_count() {
-            let hash = row_hash(frame, i, m);
+            let hash = row_hash(frame, i, m, contrast);
             if rows.get(i).is_some_and(|row| row.hash == hash) {
                 continue;
             }
             let fonts = fonts.get_or_insert_with(|| font_system().write().expect("font system"));
             let row = Row {
                 hash,
-                segments: shape(fonts.raw(), frame, i, m),
+                segments: shape(fonts.raw(), frame, i, m, contrast),
             };
             self.shaped.set(self.shaped.get() + 1);
             match rows.get_mut(i) {
@@ -194,12 +221,17 @@ impl Cache {
     }
 }
 
-fn row_hash(frame: &Frame, y: usize, m: Metrics) -> u64 {
+fn row_hash(frame: &Frame, y: usize, m: Metrics, contrast: f32) -> u64 {
     let mut h = DefaultHasher::new();
     m.size.to_bits().hash(&mut h);
+    contrast.to_bits().hash(&mut h);
     for c in frame.row(y) {
         c.text().hash(&mut h);
         (c.is_spacer(), c.fg(), c.bold(), c.italic(), c.faint()).hash(&mut h);
+        // Text colour depends on the ground only while contrast is being kept.
+        if contrast > 1.0 {
+            c.bg().hash(&mut h);
+        }
     }
     h.finish()
 }
@@ -215,17 +247,28 @@ fn on_grid(text: &str) -> bool {
     }
 }
 
-fn shape(fonts: &mut ct::FontSystem, frame: &Frame, y: usize, m: Metrics) -> Segments {
-    type Style = (u32, bool, bool, bool);
+fn shape(fonts: &mut ct::FontSystem, frame: &Frame, y: usize, m: Metrics, contrast: f32) -> Segments {
+    type Style = (u32, bool, bool, bool, bool);
     let end = frame
         .row(y)
         .rposition(|c| !c.text().is_empty() && c.text() != " ")
         .map_or(0, |i| i + 1);
     let mut pieces: Vec<(usize, Vec<(Style, String)>)> = Vec::new();
     let mut open = false;
+    // Neighbouring cells mostly share colours, so the last answer is usually the next one.
+    let mut last: Option<((u32, u32), u32)> = None;
     for (x, c) in frame.row(y).take(end).enumerate().filter(|(_, c)| !c.is_spacer()) {
-        let style = (c.fg(), c.bold(), c.italic(), c.faint());
+        let fg = match last {
+            _ if contrast <= 1.0 => c.fg(),
+            Some((pair, fg)) if pair == (c.fg(), c.bg()) => fg,
+            _ => {
+                let fg = contrast::adjust(c.fg(), c.bg(), contrast);
+                last = Some(((c.fg(), c.bg()), fg));
+                fg
+            }
+        };
         let text = if c.text().is_empty() { " " } else { c.text() };
+        let style = (fg, c.bold(), c.italic(), c.faint(), is_icon(text));
         let joins = on_grid(text);
         if !(open && joins) {
             pieces.push((x, Vec::new()));
@@ -242,9 +285,12 @@ fn shape(fonts: &mut ct::FontSystem, frame: &Frame, y: usize, m: Metrics) -> Seg
         .map(|(x, spans)| {
             let mut buffer = ct::Buffer::new(fonts, ct::Metrics::new(m.size, m.cell.height));
             buffer.set_wrap(ct::Wrap::None);
-            let styled = spans.iter().map(|((fg, bold, italic, faint), text)| {
+            let styled = spans.iter().map(|((fg, bold, italic, faint, icon), text)| {
                 let (r, g, b) = bytes(*fg);
                 let mut a = attrs().color(ct::Color::rgba(r, g, b, if *faint { 150 } else { 255 }));
+                if *icon {
+                    a = a.family(ct::Family::Name(SYMBOLS_FAMILY));
+                }
                 if *bold {
                     a = a.weight(ct::Weight::BOLD);
                 }
@@ -1160,8 +1206,45 @@ mod tests {
     }
 
     #[test]
+    fn nerd_font_icons_come_from_the_bundled_font_within_two_cells() {
+        load_fonts();
+        let m = Metrics::measure(14.0, 1.0);
+        let mut fonts = font_system().write().unwrap();
+        let fonts = fonts.raw();
+        // A status line's branch, folder and clock icons.
+        for icon in ["\u{e0a0}", "\u{f07c}", "\u{f017}"] {
+            let mut buffer = ct::Buffer::new(fonts, ct::Metrics::new(m.size, m.cell.height));
+            assert!(is_icon(icon));
+            let icon_attrs = attrs().family(ct::Family::Name(SYMBOLS_FAMILY));
+            buffer.set_text(icon, &icon_attrs, ct::Shaping::Advanced, None);
+            buffer.shape_until_scroll(fonts, false);
+            let run = buffer.layout_runs().next().unwrap();
+            let glyph = &run.glyphs[0];
+            let face = fonts.db().face(glyph.font_id).unwrap();
+            assert!(
+                face.families.iter().any(|(name, _)| name.contains("Nerd Font")),
+                "{icon:?} drawn from {:?}",
+                face.families
+            );
+            assert!(glyph.glyph_id != 0, "{icon:?} has a glyph, not a box");
+            // An em wide: drawn at its own column, it spills into the space that follows it in
+            // prompts and status lines, and never moves the text after it.
+            assert!(run.line_w <= 2.0 * m.cell.width + 0.5, "{icon:?}: {} vs {}", run.line_w, m.cell.width);
+        }
+    }
+
+    #[test]
+    fn changing_the_contrast_reshapes_rows() {
+        let frame = rex_backend::demo::Demo::new().panes()[0].frame.clone().unwrap();
+        let m = Metrics { size: 14.0, cell: Size::new(8.0, 18.0), scale: 1.0 };
+        assert_ne!(row_hash(&frame, 0, m, 1.0), row_hash(&frame, 0, m, 7.0));
+        assert_eq!(row_hash(&frame, 0, m, 4.5), row_hash(&frame, 0, m, 4.5));
+    }
+
+    #[test]
     fn only_sure_single_cells_join_a_run() {
         assert!(on_grid("a") && on_grid("é") && on_grid("─") && on_grid(""));
+        assert!(is_icon("\u{e0a0}") && is_icon("\u{f0001}") && !is_icon("a") && !is_icon("─") && !is_icon(""));
         assert!(!on_grid("日") && !on_grid("🙂") && !on_grid("e\u{301}") && !on_grid("\u{e0b0}"));
     }
 }

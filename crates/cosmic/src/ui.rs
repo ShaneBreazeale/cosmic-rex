@@ -396,8 +396,15 @@ pub fn sidebar<'a>(rows: Vec<BoxRow<'a>>, current: Option<&str>) -> Element<'a, 
             .extra_small()
             .tooltip("Edit name or address")
             .on_press(Message::EditBox(id.clone()));
+        // Only this computer's own shells can be started from here.
+        let new = (row.config.is_local() && online).then(|| {
+            widget::button::icon(widget::icon::from_name("list-add-symbolic").symbolic(true))
+                .extra_small()
+                .tooltip("New session")
+                .on_press(Message::NewSession(id.clone()))
+        });
         list = list.push(
-            widget::row::with_capacity(2)
+            widget::row::with_capacity(3)
                 .spacing(2)
                 .align_y(Alignment::Center)
                 .push(
@@ -406,6 +413,7 @@ pub fn sidebar<'a>(rows: Vec<BoxRow<'a>>, current: Option<&str>) -> Element<'a, 
                         .class(row_class(false))
                         .on_press(Message::SelectBox(id.clone())),
                 )
+                .push_maybe(new)
                 .push(edit),
         );
         let Some(now) = row.now else { continue };
@@ -732,12 +740,14 @@ pub fn pane_menu(p: PaneMenu) -> Vec<widget::menu::Tree<Message>> {
     )
 }
 
-/// The title bar's View menu: the terminal font, as Rex's own clients have it.
+/// The title bar's View menu: the terminal font, as Rex's own clients have it, and how much
+/// contrast text is kept at.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ViewCommand {
     Bigger,
     Smaller,
     Reset,
+    Contrast(crate::contrast::Contrast),
 }
 
 impl widget::menu::Action for ViewCommand {
@@ -753,6 +763,7 @@ pub struct ViewMenu {
     pub smaller: bool,
     /// The size is not the one the app started with.
     pub reset: bool,
+    pub contrast: crate::contrast::Contrast,
 }
 
 pub fn view_menu<'a>(v: ViewMenu) -> Element<'a, Message> {
@@ -775,6 +786,14 @@ pub fn view_menu<'a>(v: ViewMenu) -> Element<'a, Message> {
             when(v.reset, "Reset font size", ViewCommand::Reset),
             when(v.bigger, "Increase font size", ViewCommand::Bigger),
             when(v.smaller, "Decrease font size", ViewCommand::Smaller),
+            Item::Divider,
+            Item::Folder(
+                "Minimum contrast",
+                crate::contrast::Contrast::ALL
+                    .into_iter()
+                    .map(|c| Item::CheckBox(c.label(), None, c == v.contrast, ViewCommand::Contrast(c)))
+                    .collect(),
+            ),
         ],
     );
     widget::menu::bar(vec![Tree::with_children(

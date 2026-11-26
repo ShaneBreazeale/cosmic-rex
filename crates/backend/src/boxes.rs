@@ -9,6 +9,11 @@ use std::{
 /// How many identity tints there are; the frontend picks the colours.
 pub const TINTS: u8 = 6;
 
+/// The address of this computer's own shells, run by this app with no Rex server.
+pub const LOCAL: &str = "local";
+/// What this computer is called until it is renamed.
+const LOCAL_LABEL: &str = "This computer";
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoxConfig {
     /// Stable and local; never an address.
@@ -18,7 +23,7 @@ pub struct BoxConfig {
     pub monogram: String,
     #[serde(default)]
     pub tint: u8,
-    /// `unix:///path`, `ssh://user@host` or `https://host`.
+    /// `unix:///path`, `ssh://user@host`, `https://host`, or [`LOCAL`].
     pub endpoint: String,
     #[serde(default = "yes")]
     pub connect_on_start: bool,
@@ -32,6 +37,7 @@ impl BoxConfig {
     pub fn new(label: &str, endpoint: &str, others: &[BoxConfig]) -> Result<Self, String> {
         let endpoint = normalize(endpoint)?;
         let label = match label.trim() {
+            "" if endpoint == LOCAL => LOCAL_LABEL.to_owned(),
             "" => {
                 let host = rex_rune::settings::endpoint_label(&endpoint);
                 // A tailnet machine is known by its first name.
@@ -58,6 +64,9 @@ impl BoxConfig {
     pub fn edited(&self, label: &str, endpoint: &str, others: &[BoxConfig]) -> Result<Self, String> {
         let rest: Vec<BoxConfig> = others.iter().filter(|o| o.id != self.id).cloned().collect();
         let fresh = Self::new(label, endpoint, &rest)?;
+        if self.is_local() && !fresh.is_local() {
+            return Err("Its shells would end. Add the other machine as a new box instead".into());
+        }
         let monogram = if fresh.label == self.label { self.monogram.clone() } else { fresh.monogram };
         Ok(Self {
             id: self.id.clone(),
@@ -69,11 +78,22 @@ impl BoxConfig {
     }
 }
 
-/// Accept `user@host` as SSH; otherwise require a full address the core understands.
+impl BoxConfig {
+    /// This computer's own shells, which end when the app does.
+    pub fn is_local(&self) -> bool {
+        self.endpoint == LOCAL
+    }
+}
+
+/// Accept `user@host` as SSH and `local` as this computer; otherwise require a full address the
+/// core understands.
 fn normalize(endpoint: &str) -> Result<String, String> {
     let given = endpoint.trim();
     if given.is_empty() {
         return Err("Enter an address, such as ssh://user@host".into());
+    }
+    if given.eq_ignore_ascii_case(LOCAL) {
+        return Ok(LOCAL.to_owned());
     }
     let endpoint =
         if given.contains("://") { given.to_owned() } else { format!("ssh://{given}") };
@@ -293,6 +313,17 @@ fn write(path: &Path, configs: &[BoxConfig]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn this_computer_is_one_box_that_keeps_its_shells() {
+        let here = BoxConfig::new("", " Local ", &[]).unwrap();
+        assert!(here.is_local());
+        assert_eq!((here.endpoint.as_str(), here.label.as_str()), (LOCAL, "This computer"));
+        assert!(BoxConfig::new("again", "local", std::slice::from_ref(&here)).is_err(), "only one");
+        assert!(here.edited("laptop", "local", std::slice::from_ref(&here)).is_ok(), "renaming is fine");
+        assert!(here.edited("", "me@forge", std::slice::from_ref(&here)).is_err(), "its shells would end");
+        assert!(!BoxConfig::new("", "ssh://local", &[]).unwrap().is_local());
+    }
 
     #[test]
     fn an_edit_keeps_identity_and_is_checked_like_a_new_box() {

@@ -1,5 +1,6 @@
 //! Rex for COSMIC: a libcosmic frontend over `rex-backend`.
 mod claim;
+mod contrast;
 mod grid;
 mod keys;
 mod reorder;
@@ -29,6 +30,9 @@ const FONT_MIN: f32 = 6.0;
 const FONT_MAX: f32 = 72.0;
 const FONT_STEP: f32 = 1.0;
 const CLOSE_WAIT: Duration = Duration::from_secs(5);
+/// View menu choices saved through cosmic-config, under the app's ID.
+const SETTINGS_VERSION: u64 = 1;
+const CONTRAST_KEY: &str = "minimum_contrast";
 
 #[derive(clap::Parser, Clone)]
 #[command(version, about = "Rex for COSMIC (unofficial)")]
@@ -121,6 +125,12 @@ enum Message {
     Pasted(String, String, Option<String>),
     ToggleInbox,
     AddBox,
+    /// Fill the add-box form with this computer's own shells.
+    DraftThisComputer,
+    /// Add this computer's own shells as a box, from the first-run screen.
+    UseThisComputer,
+    /// A new session with one shell, on this local box.
+    NewSession(String),
     Draft(Field, String),
     SaveBox,
     CancelDialog,
@@ -200,6 +210,10 @@ struct App {
     metrics: Metrics,
     /// The terminal font size asked for: `--font-size` until the View menu changes it.
     font_size: f32,
+    /// The View menu's minimum contrast, kept in `settings` between runs.
+    contrast: contrast::Contrast,
+    /// Where View menu choices are saved; none in the demo, whose screenshots must not vary.
+    settings: Option<cosmic::cosmic_config::Config>,
     title: String,
     /// Answer sheets and close questions opened so far.
     sheets: u64,
@@ -238,7 +252,7 @@ impl App {
         let Some(Ok(question)) = &a.question else { return Task::none() };
         let (number, ticket, id) = (a.number, question.ticket.clone(), a.config.id.clone());
         a.sending = true;
-        let Some(asker) = self.boxes.host(&id).map(Host::asker) else {
+        let Some(asker) = self.boxes.host(&id).and_then(Host::asker) else {
             return self.update(Message::Answered(number, Outcome::NotSent("The box is disconnected".into())));
         };
         Task::perform(asker.answer(ticket, reply), move |o| {
@@ -452,7 +466,7 @@ impl Application for App {
     type Executor = cosmic::executor::Default;
     type Flags = Args;
     type Message = Message;
-    const APP_ID: &'static str = "io.github.cosmic_rex.CosmicRex";
+    const APP_ID: &'static str = "io.github.ShaneBreazeale.cosmic_rex";
 
     fn core(&self) -> &Core {
         &self.core
@@ -497,7 +511,20 @@ impl Application for App {
                 }
             }
         }
+        grid::load_fonts();
+        let settings = (!args.demo)
+            .then(|| cosmic::cosmic_config::Config::new(Self::APP_ID, SETTINGS_VERSION).ok())
+            .flatten();
+        let contrast = settings
+            .as_ref()
+            .and_then(|s| cosmic::cosmic_config::ConfigGet::get::<f32>(s, CONTRAST_KEY).ok())
+            .map(contrast::Contrast::from_ratio)
+            .unwrap_or_default();
+        let cache = Cache::default();
+        cache.set_contrast(contrast.ratio());
         let mut app = Self {
+            contrast,
+            settings,
             metrics: Metrics::measure(args.font_size, 1.0),
             font_size: args.font_size,
             demo: args.demo.then(Demo::new),
@@ -507,7 +534,7 @@ impl Application for App {
             current: first,
             dialog: None,
             problem,
-            cache: Cache::default(),
+            cache,
             title: String::new(),
             sheets: 0,
             menu_tab: None,
@@ -560,6 +587,7 @@ impl Application for App {
             bigger: self.font_size < FONT_MAX,
             smaller: self.font_size > FONT_MIN,
             reset: self.font_size != self.args.font_size,
+            contrast: self.contrast,
         });
         let Some((config, now)) = self.here() else { return vec![view] };
         let session = now.sessions.iter().find(|s| Some(&s.id) == now.session.as_ref());
@@ -609,7 +637,7 @@ impl Application for App {
                 let mut form = widget::column::with_capacity(4)
                     .spacing(12)
                     .push(
-                        widget::text_input("user@host, https://… or unix:///…", address.as_str())
+                        widget::text_input("user@host, https://…, unix:///… or local", address.as_str())
                             .label("Address")
                             .on_input(|v| Message::Draft(Field::Address, v))
                             .on_submit(|_| Message::SaveBox),
@@ -620,14 +648,25 @@ impl Application for App {
                             .on_input(|v| Message::Draft(Field::Label, v))
                             .on_submit(|_| Message::SaveBox),
                     );
+                if editing.is_none() && !self.boxes.iter().any(BoxConfig::is_local) {
+                    form = form.push(
+                        widget::button::text("Use this computer: shells without Rex")
+                            .on_press(Message::DraftThisComputer),
+                    );
+                }
                 if let Some(error) = error {
                     form = form.push(widget::text::body(error.as_str()));
                 }
                 let (title, action) =
                     if editing.is_some() { ("Edit box", "Save") } else { ("Add a box", "Add box") };
+                let body = if address.trim().eq_ignore_ascii_case(rex_backend::LOCAL) {
+                    "Shells run in this app, with no Rex server. They end when the app closes."
+                } else {
+                    "Connecting gives this app everything your account can do on that machine. It starts, stops and resizes nothing by itself."
+                };
                 widget::dialog()
                     .title(title)
-                    .body("Connecting gives this app everything your account can do on that machine. It starts, stops and resizes nothing by itself.")
+                    .body(body)
                     .control(form)
                     .primary_action(widget::button::suggested(action).on_press(Message::SaveBox))
                     .secondary_action(cancel())
@@ -643,10 +682,14 @@ impl Application for App {
             }),
             Dialog::CloseTab { config, session, window, label, armed, .. } => widget::dialog()
                 .title(format!("Close tab \u{2018}{label}\u{2019} on {}?", config.label))
-                .body(format!(
-                    "Ends every program running in this tab on {}, for every device viewing it. Closing this window instead ends nothing.",
-                    config.label
-                ))
+                .body(if config.is_local() {
+                    "Ends every program running in this tab.".to_owned()
+                } else {
+                    format!(
+                        "Ends every program running in this tab on {}, for every device viewing it. Closing this window instead ends nothing.",
+                        config.label
+                    )
+                })
                 .primary_action(widget::button::suggested("Keep running").on_press(Message::CancelDialog))
                 .secondary_action(widget::button::destructive("Close tab").on_press_maybe(armed.then(|| {
                     Message::CloseTab { id: config.id.clone(), session: session.clone(), window: window.clone() }
@@ -654,10 +697,14 @@ impl Application for App {
                 .into(),
             Dialog::ClosePane { config, session, block, label, armed, .. } => widget::dialog()
                 .title(format!("Close pane \u{2018}{label}\u{2019} on {}?", config.label))
-                .body(format!(
-                    "Ends the program running in this pane on {}, for every device viewing it. The tab's other panes keep running.",
-                    config.label
-                ))
+                .body(if config.is_local() {
+                    "Ends the program running in this pane. The tab's other panes keep running.".to_owned()
+                } else {
+                    format!(
+                        "Ends the program running in this pane on {}, for every device viewing it. The tab's other panes keep running.",
+                        config.label
+                    )
+                })
                 .primary_action(widget::button::suggested("Keep running").on_press(Message::CancelDialog))
                 .secondary_action(widget::button::destructive("Close pane").on_press_maybe(armed.then(|| {
                     Message::ClosePane { id: config.id.clone(), session: session.clone(), block: block.clone() }
@@ -665,7 +712,11 @@ impl Application for App {
                 .into(),
             Dialog::Rename { config, label, .. } => widget::dialog()
                 .title("Rename tab")
-                .body(format!("Every device viewing this session on {} sees the new name.", config.label))
+                .body(if config.is_local() {
+                    String::new()
+                } else {
+                    format!("Every device viewing this session on {} sees the new name.", config.label)
+                })
                 .control(
                     widget::text_input("Leave empty for its default name", label.as_str())
                         .label("Name")
@@ -677,15 +728,21 @@ impl Application for App {
                 .into(),
             Dialog::CloseSession { config, session, label, tabs, armed, .. } => widget::dialog()
                 .title(format!("Close session \u{2018}{label}\u{2019} on {}?", config.label))
-                .body(format!(
-                    "Ends every program in {} on {}, for every device viewing it. Closing this window instead ends nothing.",
-                    match tabs {
+                .body({
+                    let tabs = match tabs {
                         Some(1) => "its one tab".to_owned(),
                         Some(n) => format!("its {n} tabs"),
                         None => "all its tabs".to_owned(),
-                    },
-                    config.label
-                ))
+                    };
+                    if config.is_local() {
+                        format!("Ends every program in {tabs}.")
+                    } else {
+                        format!(
+                            "Ends every program in {tabs} on {}, for every device viewing it. Closing this window instead ends nothing.",
+                            config.label
+                        )
+                    }
+                })
                 .primary_action(widget::button::suggested("Keep running").on_press(Message::CancelDialog))
                 .secondary_action(widget::button::destructive("Close session").on_press_maybe(
                     armed.then(|| Message::CloseSession { id: config.id.clone(), session: session.clone() }),
@@ -693,7 +750,11 @@ impl Application for App {
                 .into(),
             Dialog::RenameSession { config, label, .. } => widget::dialog()
                 .title("Rename session")
-                .body(format!("Every device viewing {} sees the new name.", config.label))
+                .body(if config.is_local() {
+                    String::new()
+                } else {
+                    format!("Every device viewing {} sees the new name.", config.label)
+                })
                 .control(
                     widget::text_input("Session name", label.as_str())
                         .label("Name")
@@ -708,7 +769,11 @@ impl Application for App {
                 .into(),
             Dialog::Remove(config) => widget::dialog()
                 .title(format!("Remove {}?", config.label))
-                .body("It is only forgotten here. Everything running on it keeps running.")
+                .body(if config.is_local() {
+                    "Every shell running in it ends now."
+                } else {
+                    "It is only forgotten here. Everything running on it keeps running."
+                })
                 .primary_action(
                     widget::button::destructive("Remove")
                         .on_press(Message::Remove(config.id.clone())),
@@ -880,11 +945,20 @@ impl Application for App {
                     }
                 }
             }
+            Message::View(ui::ViewCommand::Contrast(contrast)) => {
+                self.contrast = contrast;
+                self.cache.set_contrast(contrast.ratio());
+                if let Some(settings) = &self.settings
+                    && let Err(error) = cosmic::cosmic_config::ConfigSet::set(settings, CONTRAST_KEY, contrast.ratio())
+                {
+                    eprintln!("could not save the contrast setting: {error}");
+                }
+            }
             Message::View(command) => {
                 let size = match command {
                     ui::ViewCommand::Bigger => self.font_size + FONT_STEP,
                     ui::ViewCommand::Smaller => self.font_size - FONT_STEP,
-                    ui::ViewCommand::Reset => self.args.font_size,
+                    ui::ViewCommand::Reset | ui::ViewCommand::Contrast(_) => self.args.font_size,
                 }
                 .clamp(FONT_MIN, FONT_MAX);
                 if size != self.font_size {
@@ -1056,6 +1130,28 @@ impl Application for App {
                     editing: None,
                 });
             }
+            Message::DraftThisComputer => {
+                if let Some(Dialog::Add { address, error, .. }) = &mut self.dialog {
+                    *address = rex_backend::LOCAL.to_owned();
+                    *error = None;
+                }
+            }
+            Message::UseThisComputer => {
+                self.dialog = Some(Dialog::Add {
+                    label: String::new(),
+                    address: rex_backend::LOCAL.to_owned(),
+                    error: None,
+                    editing: None,
+                });
+                return self.update(Message::SaveBox);
+            }
+            Message::NewSession(id) => {
+                if let Some(host) = self.boxes.host(&id) {
+                    host.new_session();
+                }
+                let shown = self.show_box(&id);
+                return Task::batch([shown, self.refresh()]);
+            }
             Message::EditBox(id) => {
                 self.dialog = self.boxes.config(&id).map(|c| Dialog::Add {
                     label: c.label.clone(),
@@ -1144,7 +1240,7 @@ impl Application for App {
                 if let Some(question) = demo {
                     return self.update(Message::Asked(number, Ok(question)));
                 }
-                let Some(asker) = self.boxes.host(&id).map(Host::asker) else {
+                let Some(asker) = self.boxes.host(&id).and_then(Host::asker) else {
                     return self.update(Message::Asked(number, Err("The box is disconnected".into())));
                 };
                 return Task::perform(asker.question(target.0, target.1), move |q| {
@@ -1261,11 +1357,14 @@ impl Application for App {
                     c.endpoint.clone(),
                     widget::button::suggested("Connect").on_press(Message::Connect(c.id.clone())),
                 ),
-                None => (
-                    "Add a box to begin".to_owned(),
-                    "A box is a machine running a Rex server.".to_owned(),
-                    widget::button::suggested("Add box").on_press(Message::AddBox),
-                ),
+                None => {
+                    let buttons = vec![
+                        widget::button::suggested("Add box").on_press(Message::AddBox).into(),
+                        widget::button::standard("Use this computer").on_press(Message::UseThisComputer).into(),
+                    ];
+                    let body = "A box is a machine running a Rex server, or this computer's own shells.";
+                    return page.push(notice("Add a box to begin".to_owned(), body.to_owned(), buttons)).into();
+                }
             };
             return page.push(notice(title, body, vec![button.into()])).into();
         };
@@ -1274,7 +1373,10 @@ impl Application for App {
         }
         let panes = self.panes();
         if panes.is_empty() {
-            let (title, buttons): (String, Vec<Element<'_, Message>>) = if now.connected {
+            let (title, buttons): (String, Vec<Element<'_, Message>>) = if config.is_local() && now.sessions.is_empty() {
+                let new = widget::button::suggested("New session").on_press(Message::NewSession(config.id.clone()));
+                (format!("No shells open on {}", config.label), vec![new.into()])
+            } else if now.connected {
                 (format!("No session open on {}", config.label), Vec::new())
             } else {
                 (
@@ -1295,7 +1397,13 @@ impl Application for App {
                     ],
                 )
             };
-            let body = if now.connected { "Choose one in the sidebar." } else { now.status.as_str() };
+            let body = if config.is_local() && now.sessions.is_empty() {
+                "Shells run in this app and end when it closes."
+            } else if now.connected {
+                "Choose one in the sidebar."
+            } else {
+                now.status.as_str()
+            };
             return page.push(notice(title, body.to_owned(), buttons)).into();
         }
         let identity = Identity { monogram: config.monogram.clone(), tint: ui::tint(config) };

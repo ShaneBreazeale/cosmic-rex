@@ -13,16 +13,16 @@ publish = false
 # use it. Change the revision with scripts/update-backend.sh, which keeps all four in step.
 # To hack on the core, point these at a local checkout instead (see docs/ARCHITECTURE.md).
 [workspace.dependencies]
-rex-rune = { git = "https://github.com/shuv1337/rex-rune", rev = "bd77ede24b04dfa367211367fb553917d86da400", default-features = false }
+rex-rune = { git = "https://github.com/shuv1337/rex-rune", rev = "b38f257bef016ff0cc7699a340de503d73affddb", default-features = false }
 rexrs = { git = "https://github.com/a10y/rexrs", rev = "780be3f9f0455c758273e57199af30bdaa145cf1", default-features = false }
 ghostty-vt = { version = "=0.8.0", features = ["png"] }
 rex-backend = { path = "crates/backend" }
 
 # rex-rune's own patches; Cargo applies patches only from the top-level workspace.
 [patch."https://github.com/a10y/rexrs"]
-rexrs = { git = "https://github.com/shuv1337/rex-rune", rev = "bd77ede24b04dfa367211367fb553917d86da400" }
+rexrs = { git = "https://github.com/shuv1337/rex-rune", rev = "b38f257bef016ff0cc7699a340de503d73affddb" }
 [patch.crates-io]
-ghostty-vt = { git = "https://github.com/shuv1337/rex-rune", rev = "bd77ede24b04dfa367211367fb553917d86da400" }
+ghostty-vt = { git = "https://github.com/shuv1337/rex-rune", rev = "b38f257bef016ff0cc7699a340de503d73affddb" }
 
 [profile.dev.package."*"]
 opt-level = 2

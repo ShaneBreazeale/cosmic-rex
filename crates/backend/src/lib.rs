@@ -1,4 +1,4 @@
-//! Frontend-neutral client API over the rex-rune core.
+//! Frontend-neutral client API over the rex-rune core, and shells on this computer.
 //!
 //! This is the only crate that names rex-rune types, and none appear in its public API. When a
 //! new core revision changes something, the fix belongs here and frontends don't notice.
@@ -10,11 +10,12 @@ pub mod demo;
 mod frame;
 mod host;
 mod input;
+mod local;
 mod model;
 mod predict;
 
 pub use answer::{AnswerKey, Asker, Outcome, Question, Reply, Ticket, pause};
-pub use boxes::{BoxConfig, Boxes, TINTS};
+pub use boxes::{BoxConfig, Boxes, LOCAL, TINTS};
 pub use frame::{CellRef, CursorShape, Frame, Underline};
 pub use host::{Button, Host, Key, KeyAction, Mouse, Pointer, Select, Split, Wake};
 pub use predict::set_local_echo;
