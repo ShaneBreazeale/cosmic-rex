@@ -2,7 +2,8 @@
 use crate::{Size, Snapshot, input::Input, model::size, predict::Predictor};
 use rex_rune::{
     connection::{
-        Command, Connection, DEFAULT_TAB_LABEL, HostCommand, HostConnection, perform::Outcome,
+        Command, Connection, DEFAULT_TAB_LABEL, HostCommand, HostConnection, HumanClose,
+        perform::Outcome,
     },
     layout,
 };
@@ -319,6 +320,20 @@ impl Host {
                 "focus": true,
             }),
             cwd_from: block.to_owned(),
+        });
+    }
+    /// Ends every program in the tab. Only on a confirmed, explicit request; sent once.
+    pub fn close_tab(&self, session: &str, window: &str) {
+        self.send(HostCommand::Close {
+            kind: HumanClose::Tab,
+            payload: json!({"session_id": session, "window_id": window}),
+        });
+    }
+    /// Names a tab for every device; an empty name gives it its default title back.
+    pub fn rename_tab(&self, session: &str, window: &str, label: &str) {
+        self.send(HostCommand::Request {
+            method: "session.set_window_label".into(),
+            payload: json!({"session_id": session, "window_id": window, "label": label}),
         });
     }
     pub fn split(&self, session: &str, block: &str, split: Split) {

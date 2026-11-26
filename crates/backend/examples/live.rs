@@ -271,8 +271,27 @@ fn checks(mac: &HostConnection, host: &Host, block: &str, session: &str) -> Chec
     .map(|()| pass("interrupting clears it"))
     .or_else(|_| {
         println!("NOTE  the record stayed after Ctrl+C (needs shell prompt marks)");
-        Ok(())
-    })
+        Ok::<(), String>(())
+    })?;
+    tabs(host, block, session)
+}
+
+/// A second tab in the throwaway session: renamed, then closed, leaving the first one as it was.
+fn tabs(host: &Host, block: &str, session: &str) -> Check {
+    let first = host.snapshot().tabs;
+    ensure(first.len() == 1, "the throwaway session starts with one tab")?;
+    host.new_tab(session, block);
+    let new = until("the new tab", 15, || {
+        host.snapshot().tabs.into_iter().find(|t| first.iter().all(|f| f.id != t.id))
+    })?;
+    host.rename_tab(session, &new.id, "live-renamed");
+    until("the new name", 15, || {
+        host.snapshot().tabs.iter().any(|t| t.id == new.id && t.label == "live-renamed").then_some(())
+    })?;
+    pass("a tab renamed from here is renamed on the server");
+    host.close_tab(session, &new.id);
+    until("the tab to close", 15, || (host.snapshot().tabs == first).then_some(()))?;
+    ensure(host.snapshot().sessions.iter().any(|s| s.id == session), "closing a tab closes only that tab")
 }
 
 fn main() {

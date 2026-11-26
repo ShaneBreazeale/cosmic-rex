@@ -1,4 +1,5 @@
 //! Rex for COSMIC: a libcosmic frontend over `rex-backend`.
+mod claim;
 mod grid;
 mod keys;
 mod ui;
@@ -83,6 +84,20 @@ enum Message {
     SelectBox(String),
     OpenSession(String, String),
     Tab(String),
+    /// A tab's menu opened: its commands act on this tab.
+    TabMenu(String),
+    /// The pointer came onto this tab.
+    HoverTab(String),
+    /// The pointer left this tab. Clears only this one: entering the next may come first.
+    LeaveTab(String),
+    TabCommand(ui::TabCommand),
+    AskCloseTab(String),
+    CloseTab { id: String, session: String, window: String },
+    RenameDraft(String),
+    RenameTab,
+    /// The close question has been readable for a moment.
+    DialogArmed(u64),
+    Surface(cosmic::surface::Action<Message>),
     OpenAgent(String, String, String),
     Pasted(String, String, Option<String>),
     ToggleInbox,
@@ -124,6 +139,9 @@ enum Dialog {
     Remove(BoxConfig),
     Fit { config: BoxConfig, session: String, block: String },
     Answer(Box<Answer>),
+    /// Ends programs, so it asks, and Close stays inert until `armed`.
+    CloseTab { config: BoxConfig, session: String, window: String, label: String, number: u64, armed: bool },
+    Rename { config: BoxConfig, session: String, window: String, label: String },
 }
 
 /// An open answer sheet. Results carry its number, so a late one can't land in another sheet.
@@ -155,8 +173,11 @@ struct App {
     cache: Cache,
     metrics: Metrics,
     title: String,
-    /// Answer sheets opened so far.
+    /// Answer sheets and close questions opened so far.
     sheets: u64,
+    /// The tab whose right-click menu opened last.
+    menu_tab: Option<String>,
+    hovered_tab: Option<String>,
     started: Instant,
 }
 
@@ -381,6 +402,8 @@ impl Application for App {
             cache: Cache::default(),
             title: String::new(),
             sheets: 0,
+            menu_tab: None,
+            hovered_tab: None,
             started: Instant::now(),
             core,
             args,
@@ -429,8 +452,10 @@ impl Application for App {
             out.push(widget::space::horizontal().width(12).into());
             out.push(ui::tabs(
                 (now.tabs.iter())
-                    .map(|t| (t.label.as_str(), now.tab.as_ref() == Some(&t.id), Message::Tab(t.id.clone())))
+                    .map(|t| ui::TabItem { id: &t.id, label: &t.label, active: now.tab.as_ref() == Some(&t.id) })
                     .collect(),
+                self.hovered_tab.as_deref(),
+                self.can_open_tab().then_some(Message::Grid(Action::Shortcut(Shortcut::NewTab))),
             ));
         }
         out
@@ -443,18 +468,7 @@ impl Application for App {
         } else {
             widget::button::standard(format!("◆ {waiting} need you"))
         };
-        let mut out = vec![button.on_press(Message::ToggleInbox).into()];
-        // A new tab beside the pane with the keyboard, as Rex's + does.
-        if self.panes().iter().any(|p| p.focused) {
-            out.insert(
-                0,
-                widget::button::icon(widget::icon::from_name("list-add-symbolic"))
-                    .tooltip("New tab")
-                    .on_press(Message::Grid(Action::Shortcut(Shortcut::NewTab)))
-                    .into(),
-            );
-        }
-        out
+        vec![button.on_press(Message::ToggleInbox).into()]
     }
 
     fn context_drawer(&self) -> Option<context_drawer::ContextDrawer<'_, Message>> {
@@ -503,6 +517,29 @@ impl Application for App {
                 outcome: a.outcome.as_deref().or(a.sending.then_some("Sending…")),
                 armed: a.armed && !a.sending && a.outcome.is_none(),
             }),
+            Dialog::CloseTab { config, session, window, label, armed, .. } => widget::dialog()
+                .title(format!("Close tab \u{2018}{label}\u{2019} on {}?", config.label))
+                .body(format!(
+                    "Ends every program running in this tab on {}, for every device viewing it. Closing this window instead ends nothing.",
+                    config.label
+                ))
+                .primary_action(widget::button::suggested("Keep running").on_press(Message::CancelDialog))
+                .secondary_action(widget::button::destructive("Close tab").on_press_maybe(armed.then(|| {
+                    Message::CloseTab { id: config.id.clone(), session: session.clone(), window: window.clone() }
+                })))
+                .into(),
+            Dialog::Rename { config, label, .. } => widget::dialog()
+                .title("Rename tab")
+                .body(format!("Every device viewing this session on {} sees the new name.", config.label))
+                .control(
+                    widget::text_input("Leave empty for its default name", label.as_str())
+                        .label("Name")
+                        .on_input(Message::RenameDraft)
+                        .on_submit(|_| Message::RenameTab),
+                )
+                .primary_action(widget::button::suggested("Rename").on_press(Message::RenameTab))
+                .secondary_action(cancel())
+                .into(),
             Dialog::Remove(config) => widget::dialog()
                 .title(format!("Remove {}?", config.label))
                 .body("It is only forgotten here. Everything running on it keeps running.")
@@ -634,6 +671,71 @@ impl Application for App {
                     host.open(session, Some(window));
                 }
             }
+            Message::TabMenu(window) => self.menu_tab = Some(window),
+            Message::HoverTab(window) => self.hovered_tab = Some(window),
+            Message::LeaveTab(window) => {
+                if self.hovered_tab.as_ref() == Some(&window) {
+                    self.hovered_tab = None;
+                }
+            }
+            Message::TabCommand(command) => {
+                let Some(window) = self.menu_tab.clone() else { return Task::none() };
+                match command {
+                    ui::TabCommand::New => return self.shortcut(Shortcut::NewTab),
+                    ui::TabCommand::Close => return self.update(Message::AskCloseTab(window)),
+                    ui::TabCommand::Rename => {
+                        if let Some((config, now)) = self.here()
+                            && let (Some(session), Some(tab)) =
+                                (now.session.clone(), now.tabs.iter().find(|t| t.id == window))
+                        {
+                            let (config, label) = (config.clone(), tab.label.clone());
+                            self.dialog = Some(Dialog::Rename { config, session, window, label });
+                        }
+                    }
+                }
+            }
+            Message::AskCloseTab(window) => {
+                let Some((config, now)) = self.here() else { return Task::none() };
+                let (Some(session), Some(tab)) =
+                    (now.session.clone(), now.tabs.iter().find(|t| t.id == window))
+                else {
+                    return Task::none();
+                };
+                let (config, label) = (config.clone(), tab.label.clone());
+                self.sheets += 1;
+                let number = self.sheets;
+                self.dialog = Some(Dialog::CloseTab { config, session, window, label, number, armed: false });
+                // Long enough that a click meant for the menu can't land on Close.
+                return Task::perform(rex_backend::pause(Duration::from_millis(300)), move |()| {
+                    cosmic::Action::App(Message::DialogArmed(number))
+                });
+            }
+            Message::DialogArmed(n) => {
+                if let Some(Dialog::CloseTab { number, armed, .. }) = &mut self.dialog
+                    && *number == n
+                {
+                    *armed = true;
+                }
+            }
+            Message::CloseTab { id, session, window } => {
+                self.dialog = None;
+                if let Some(host) = self.boxes.host(&id) {
+                    host.close_tab(&session, &window);
+                }
+            }
+            Message::RenameDraft(text) => {
+                if let Some(Dialog::Rename { label, .. }) = &mut self.dialog {
+                    *label = text;
+                }
+            }
+            Message::RenameTab => {
+                if let Some(Dialog::Rename { config, session, window, label }) = self.dialog.take()
+                    && let Some(host) = self.boxes.host(&config.id)
+                {
+                    host.rename_tab(&session, &window, label.trim());
+                }
+            }
+            Message::Surface(action) => return cosmic::task::message(cosmic::Action::Surface(action)),
             Message::OpenAgent(id, session, window) => {
                 if let Some(host) = self.boxes.host(&id) {
                     host.open(session, Some(window));
@@ -904,6 +1006,10 @@ impl Application for App {
 }
 
 impl App {
+    /// A new tab opens beside the pane with the keyboard, as Rex's + does, so it needs one.
+    fn can_open_tab(&self) -> bool {
+        self.panes().iter().any(|p| p.focused)
+    }
     fn configs(&self) -> impl Iterator<Item = &BoxConfig> {
         self.boxes.iter()
     }

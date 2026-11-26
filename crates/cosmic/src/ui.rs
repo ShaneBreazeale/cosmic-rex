@@ -151,28 +151,87 @@ pub fn place<'a>(session: Option<&'a str>, host: &'a str) -> Element<'a, Message
     lines.push(one_line(faint(host))).into()
 }
 
+/// What a tab's right-click menu can do. The tab it acts on is the one whose menu opened last.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TabCommand {
+    New,
+    Rename,
+    Close,
+}
+
+impl widget::menu::Action for TabCommand {
+    type Message = Message;
+    fn message(&self) -> Message {
+        Message::TabCommand(*self)
+    }
+}
+
+pub struct TabItem<'a> {
+    pub id: &'a str,
+    pub label: &'a str,
+    pub active: bool,
+}
+
 /// The tab strip, as in Rex: one tray across the title bar, the open tab a raised pill, the others
-/// plain, with a hairline between two that are both closed.
-pub fn tabs<'a>(tabs: Vec<(&'a str, bool, Message)>) -> Element<'a, Message> {
+/// plain, with a hairline between two that are both closed. Each tab has its own right-click menu
+/// and closes with a middle click or its ×, all asking first; none reaches the window menu behind.
+/// The × shows on the open tab and the one under the pointer; `new_tab` follows the last tab.
+pub fn tabs<'a>(tabs: Vec<TabItem<'a>>, hovered: Option<&str>, new_tab: Option<Message>) -> Element<'a, Message> {
+    use widget::menu;
     let mut strip = widget::row::with_capacity(tabs.len() * 2).align_y(Alignment::Center);
-    for (i, (label, active, on_press)) in tabs.iter().enumerate() {
-        let quiet_pair = i > 0 && !active && !tabs[i - 1].1;
+    for (i, tab) in tabs.iter().enumerate() {
+        let quiet_pair = i > 0 && !tab.active && !tabs[i - 1].active;
         strip = strip.push(if quiet_pair { divider() } else { widget::space::horizontal().width(1).into() });
-        let face = widget::row::with_capacity(2)
+        // The same room either way, so the label never moves when the × comes and goes.
+        let close: Element<'a, Message> = if tab.active || hovered == Some(tab.id) {
+            widget::button::icon(widget::icon::from_name("window-close-symbolic").size(12))
+                .padding(2)
+                .tooltip("Close tab…")
+                .on_press(Message::AskCloseTab(tab.id.to_owned()))
+                .into()
+        } else {
+            widget::space::horizontal().into()
+        };
+        let face = widget::row::with_capacity(3)
             .spacing(8)
             .align_y(Alignment::Center)
-            .push(tab_icon(*active))
+            .push(tab_icon(tab.active))
             .push(
-                one_line(widget::text::body(*label))
+                one_line(widget::text::body(tab.label))
                     .width(Length::Fill)
                     .align_y(cosmic::iced::alignment::Vertical::Center),
-            );
+            )
+            .push(widget::container(close).center_x(Length::Fixed(20.0)));
+        let button = widget::button::custom(face)
+            .padding([5, 4, 5, 6])
+            .width(Length::Fixed(180.0))
+            .class(tab_class(tab.active))
+            .on_press(Message::Tab(tab.id.to_owned()));
+        let items = menu::items(
+            &std::collections::HashMap::new(),
+            vec![
+                menu::Item::Button("New tab", None, TabCommand::New),
+                menu::Item::Button("Rename…", None, TabCommand::Rename),
+                menu::Item::Divider,
+                menu::Item::Button("Close tab…", None, TabCommand::Close),
+            ],
+        );
+        let watched = widget::mouse_area(button)
+            .on_enter(Message::HoverTab(tab.id.to_owned()))
+            .on_exit(Message::LeaveTab(tab.id.to_owned()));
+        let claimed = crate::claim::claim(watched, Some(Message::AskCloseTab(tab.id.to_owned())));
         strip = strip.push(
-            widget::button::custom(face)
-                .padding([5, 12, 5, 6])
-                .width(Length::Fixed(180.0))
-                .class(tab_class(*active))
-                .on_press(on_press.clone()),
+            widget::context_menu(claimed, Some(items))
+                .on_open(Message::TabMenu(tab.id.to_owned()))
+                .on_surface_action(Message::Surface),
+        );
+    }
+    if let Some(on_press) = new_tab {
+        strip = strip.push(widget::space::horizontal().width(4)).push(
+            widget::button::icon(widget::icon::from_name("list-add-symbolic"))
+                .padding(6)
+                .tooltip("New tab")
+                .on_press(on_press),
         );
     }
     widget::container(strip)
