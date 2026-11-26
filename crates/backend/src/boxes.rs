@@ -52,6 +52,21 @@ impl BoxConfig {
         check(&new, others)?;
         Ok(new)
     }
+
+    /// This box with a new name or address, checked as a new one would be. It keeps its id,
+    /// tint and start-up choice, and its monogram unless the name changed.
+    pub fn edited(&self, label: &str, endpoint: &str, others: &[BoxConfig]) -> Result<Self, String> {
+        let rest: Vec<BoxConfig> = others.iter().filter(|o| o.id != self.id).cloned().collect();
+        let fresh = Self::new(label, endpoint, &rest)?;
+        let monogram = if fresh.label == self.label { self.monogram.clone() } else { fresh.monogram };
+        Ok(Self {
+            id: self.id.clone(),
+            monogram,
+            tint: self.tint,
+            connect_on_start: self.connect_on_start,
+            ..fresh
+        })
+    }
 }
 
 /// Accept `user@host` as SSH; otherwise require a full address the core understands.
@@ -176,6 +191,27 @@ impl Boxes {
         })
     }
 
+    /// Save an edited box. A new address drops the old connection and, if there was one, opens
+    /// one to the new address; nothing on either machine changes.
+    pub fn replace(&mut self, edited: BoxConfig) -> Result<(), String> {
+        let Some(at) = self.boxes.iter().position(|(c, _)| c.id == edited.id) else {
+            return Err("That box is no longer in the list".into());
+        };
+        let others: Vec<BoxConfig> =
+            self.configs().into_iter().filter(|c| c.id != edited.id).collect();
+        check(&edited, &others)?;
+        let old = std::mem::replace(&mut self.boxes[at].0, edited);
+        if let Err(error) = self.save() {
+            self.boxes[at].0 = old;
+            return Err(error);
+        }
+        let (config, host) = &mut self.boxes[at];
+        if config.endpoint != old.endpoint && host.take().is_some() {
+            *host = Some(Host::connect(config.endpoint.clone(), None));
+        }
+        Ok(())
+    }
+
     /// Forget a box here. Nothing on the box changes.
     pub fn remove(&mut self, id: &str) -> Result<(), String> {
         let Some(at) = self.boxes.iter().position(|(c, _)| c.id == id) else { return Ok(()) };
@@ -257,6 +293,42 @@ fn write(path: &Path, configs: &[BoxConfig]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_edit_keeps_identity_and_is_checked_like_a_new_box() {
+        let a = BoxConfig::new("", "ssh://shane@100.122.107.79", &[]).unwrap();
+        let b = BoxConfig::new("forge", "me@forge", std::slice::from_ref(&a)).unwrap();
+        let all = [a.clone(), b.clone()];
+        // Same name, new address: everything else stays.
+        let moved = a.edited(&a.label, "https://mini-rex.tail1234.ts.net", &all).unwrap();
+        assert_eq!(moved.endpoint, "https://mini-rex.tail1234.ts.net");
+        assert_eq!((&moved.id, &moved.label, &moved.monogram, moved.tint), (&a.id, &a.label, &a.monogram, a.tint));
+        // A blank name is taken from the new address, and the monogram follows it.
+        let renamed = a.edited("", "https://mini-rex.tail1234.ts.net", &all).unwrap();
+        assert_eq!(renamed.label, "mini-rex");
+        assert_eq!(renamed.monogram, "MI");
+        // Its own old values never clash with itself; another box's do.
+        assert!(a.edited(&a.label, &a.endpoint, &all).is_ok());
+        assert!(a.edited("FORGE", &a.endpoint, &all).is_err());
+        assert!(a.edited(&a.label, "me@forge", &all).is_err());
+        assert!(a.edited(&a.label, "http://example.com", &all).is_err());
+    }
+
+    #[test]
+    fn replacing_a_box_saves_the_edit_and_refuses_a_clash() {
+        let a = BoxConfig::new("mini", "ssh://shane@100.122.107.79", &[]).unwrap();
+        let b = BoxConfig::new("forge", "me@forge", std::slice::from_ref(&a)).unwrap();
+        let mut boxes = Boxes::temporary(vec![a.clone(), b.clone()]);
+        let fixed = a.edited("mini", "https://mini-rex.tail1234.ts.net", &boxes.configs()).unwrap();
+        boxes.replace(fixed.clone()).unwrap();
+        assert_eq!(boxes.config(&a.id), Some(&fixed));
+        // Built against a stale list, a clash is still caught when saved.
+        let clash = BoxConfig { endpoint: b.endpoint.clone(), ..fixed.clone() };
+        assert!(boxes.replace(clash).is_err());
+        assert_eq!(boxes.config(&a.id), Some(&fixed));
+        let gone = BoxConfig { id: "box-99".into(), ..fixed };
+        assert!(boxes.replace(gone).is_err());
+    }
 
     #[test]
     fn addresses_are_normalized_and_unsafe_ones_refused() {

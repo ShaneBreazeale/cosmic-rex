@@ -91,6 +91,7 @@ enum Message {
     SaveBox,
     CancelDialog,
     AskRemove(String),
+    EditBox(String),
     Remove(String),
     Fit(String, String, String),
     Ask(String, Box<Agent>),
@@ -118,7 +119,8 @@ enum Field {
 
 /// What has the keyboard instead of the terminals.
 enum Dialog {
-    Add { label: String, address: String, error: Option<String> },
+    /// Adding a box, or editing the one with this id.
+    Add { label: String, address: String, error: Option<String>, editing: Option<String> },
     Remove(BoxConfig),
     Fit { config: BoxConfig, session: String, block: String },
     Answer(Box<Answer>),
@@ -465,7 +467,7 @@ impl Application for App {
     fn dialog(&self) -> Option<Element<'_, Message>> {
         let cancel = || widget::button::standard("Cancel").on_press(Message::CancelDialog);
         Some(match self.dialog.as_ref()? {
-            Dialog::Add { label, address, error } => {
+            Dialog::Add { label, address, error, editing } => {
                 let mut form = widget::column::with_capacity(4)
                     .spacing(12)
                     .push(
@@ -483,11 +485,13 @@ impl Application for App {
                 if let Some(error) = error {
                     form = form.push(widget::text::body(error.as_str()));
                 }
+                let (title, action) =
+                    if editing.is_some() { ("Edit box", "Save") } else { ("Add a box", "Add box") };
                 widget::dialog()
-                    .title("Add a box")
+                    .title(title)
                     .body("Connecting gives this app everything your account can do on that machine. It starts, stops and resizes nothing by itself.")
                     .control(form)
-                    .primary_action(widget::button::suggested("Add box").on_press(Message::SaveBox))
+                    .primary_action(widget::button::suggested(action).on_press(Message::SaveBox))
                     .secondary_action(cancel())
                     .into()
             }
@@ -644,10 +648,19 @@ impl Application for App {
                     label: String::new(),
                     address: String::new(),
                     error: None,
+                    editing: None,
+                });
+            }
+            Message::EditBox(id) => {
+                self.dialog = self.boxes.config(&id).map(|c| Dialog::Add {
+                    label: c.label.clone(),
+                    address: c.endpoint.clone(),
+                    error: None,
+                    editing: Some(c.id.clone()),
                 });
             }
             Message::Draft(field, value) => {
-                if let Some(Dialog::Add { label, address, error }) = &mut self.dialog {
+                if let Some(Dialog::Add { label, address, error, .. }) = &mut self.dialog {
                     *error = None;
                     *(match field {
                         Field::Label => label,
@@ -656,13 +669,20 @@ impl Application for App {
                 }
             }
             Message::SaveBox => {
-                let Some(Dialog::Add { label, address, error }) = &mut self.dialog else {
+                let Some(Dialog::Add { label, address, error, editing }) = &mut self.dialog else {
                     return Task::none();
                 };
-                let saved = BoxConfig::new(label, address, &self.boxes.configs()).and_then(|new| {
-                    let id = new.id.clone();
-                    self.boxes.add(new).map(|()| id)
-                });
+                let all = self.boxes.configs();
+                let saved = match editing.as_deref().and_then(|id| all.iter().find(|c| c.id == id)) {
+                    Some(old) => old.edited(label, address, &all).and_then(|new| {
+                        let id = new.id.clone();
+                        self.boxes.replace(new).map(|()| id)
+                    }),
+                    None => BoxConfig::new(label, address, &all).and_then(|new| {
+                        let id = new.id.clone();
+                        self.boxes.add(new).map(|()| id)
+                    }),
+                };
                 match saved {
                     Ok(id) => {
                         self.dialog = None;
@@ -853,6 +873,9 @@ impl Application for App {
                             .into(),
                         widget::button::standard("Disconnect")
                             .on_press(Message::Disconnect(config.id.clone()))
+                            .into(),
+                        widget::button::standard("Edit…")
+                            .on_press(Message::EditBox(config.id.clone()))
                             .into(),
                         widget::button::text("Remove…")
                             .on_press(Message::AskRemove(config.id.clone()))

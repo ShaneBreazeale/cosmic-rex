@@ -296,11 +296,21 @@ pub fn sidebar<'a>(rows: Vec<BoxRow<'a>>, current: Option<&str>) -> Element<'a, 
         if let Some(link) = link {
             head = head.push(muted(link));
         }
+        let edit = widget::button::icon(widget::icon::from_name("edit-symbolic").symbolic(true))
+            .extra_small()
+            .tooltip("Edit name or address")
+            .on_press(Message::EditBox(id.clone()));
         list = list.push(
-            widget::button::custom(head.padding([4, 4]))
-                .width(Length::Fill)
-                .class(row_class(false))
-                .on_press(Message::SelectBox(id.clone())),
+            widget::row::with_capacity(2)
+                .spacing(2)
+                .align_y(Alignment::Center)
+                .push(
+                    widget::button::custom(head.padding([4, 4]))
+                        .width(Length::Fill)
+                        .class(row_class(false))
+                        .on_press(Message::SelectBox(id.clone())),
+                )
+                .push(edit),
         );
         let Some(now) = row.now else { continue };
         if !online && !now.status.is_empty() {
