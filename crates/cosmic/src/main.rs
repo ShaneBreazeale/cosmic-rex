@@ -270,12 +270,17 @@ impl App {
     }
 
     fn shortcut(&mut self, shortcut: Shortcut) -> Task<Message> {
+        self.shortcut_on(shortcut, None)
+    }
+
+    /// On `pane` if given, else on the pane with the keyboard.
+    fn shortcut_on(&mut self, shortcut: Shortcut, pane: Option<&str>) -> Task<Message> {
         if shortcut == Shortcut::Agents {
             return self.update(Message::ToggleInbox);
         }
         let Some((config, now)) = self.here() else { return Task::none() };
         let (Some(host), Some(session), Some(block)) =
-            (self.host(), now.session.as_deref(), now.focused())
+            (self.host(), now.session.as_deref(), pane.or(now.focused()))
         else {
             return Task::none();
         };
@@ -410,23 +415,23 @@ impl Application for App {
     // In the start slot: text in libcosmic's centre slot, which is laid out twice, isn't drawn.
     fn header_start(&self) -> Vec<Element<'_, Message>> {
         let Some((config, now)) = self.here() else { return Vec::new() };
-        let mut path = config.label.clone();
-        if let Some(s) = now.sessions.iter().find(|s| Some(&s.id) == now.session.as_ref()) {
-            path = format!("{path} › {}", s.label);
-        }
-        if let Some(t) = now.tabs.iter().find(|t| Some(&t.id) == now.tab.as_ref()) {
-            path = format!("{path} › {}", t.label);
-        }
-        use cosmic::iced::advanced::text::{Ellipsize, EllipsizeHeightLimit, Wrapping};
-        vec![
+        let session = now.sessions.iter().find(|s| Some(&s.id) == now.session.as_ref());
+        let mut out = vec![
             widget::space::horizontal().width(8).into(),
             ui::monogram(config),
             widget::space::horizontal().width(4).into(),
-            widget::text::heading(path)
-                .wrapping(Wrapping::None)
-                .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1)))
-                .into(),
-        ]
+            ui::place(session.map(|s| s.label.as_str()), &config.label),
+        ];
+        // Tabs live in the title bar, as pills, whether or not the sidebar is open.
+        if !now.tabs.is_empty() {
+            out.push(widget::space::horizontal().width(12).into());
+            out.push(ui::tabs(
+                (now.tabs.iter())
+                    .map(|t| (t.label.as_str(), now.tab.as_ref() == Some(&t.id), Message::Tab(t.id.clone())))
+                    .collect(),
+            ));
+        }
+        out
     }
 
     fn header_end(&self) -> Vec<Element<'_, Message>> {
@@ -436,7 +441,18 @@ impl Application for App {
         } else {
             widget::button::standard(format!("◆ {waiting} need you"))
         };
-        vec![button.on_press(Message::ToggleInbox).into()]
+        let mut out = vec![button.on_press(Message::ToggleInbox).into()];
+        // A new tab beside the pane with the keyboard, as Rex's + does.
+        if self.panes().iter().any(|p| p.focused) {
+            out.insert(
+                0,
+                widget::button::icon(widget::icon::from_name("list-add-symbolic"))
+                    .tooltip("New tab")
+                    .on_press(Message::Grid(Action::Shortcut(Shortcut::NewTab)))
+                    .into(),
+            );
+        }
+        out
     }
 
     fn context_drawer(&self) -> Option<context_drawer::ContextDrawer<'_, Message>> {
@@ -561,6 +577,7 @@ impl Application for App {
             }
             Message::Grid(Action::Shortcut(s)) => return self.shortcut(s),
             Message::Grid(Action::Fit(block)) => self.ask_fit(block),
+            Message::Grid(Action::Pane(block, s)) => return self.shortcut_on(s, Some(&block)),
             Message::Grid(Action::Resize(block, cols, rows)) => {
                 let cell = self.metrics.cell;
                 if let Some(demo) = &mut self.demo {
@@ -589,7 +606,7 @@ impl Application for App {
                     }
                     Action::Scroll(block, n) => host.scroll(&block, n),
                     Action::Wheel(block, x, y, lines) => host.wheel(&block, x, y, lines),
-                    Action::Resize(..) | Action::Shortcut(_) | Action::Fit(_) => {}
+                    Action::Resize(..) | Action::Shortcut(_) | Action::Fit(_) | Action::Pane(..) => {}
                 }
             }
             Message::Pasted(id, block, text) => {
@@ -820,15 +837,6 @@ impl Application for App {
             };
             return page.push(notice(title, body, vec![button.into()])).into();
         };
-        // With the sidebar open, tabs are rows under their session.
-        if now.tabs.len() > 1 && !self.core.nav_bar_active() {
-            let mut tabs = widget::row::with_capacity(now.tabs.len()).spacing(4);
-            for t in &now.tabs {
-                let active = now.tab.as_ref() == Some(&t.id);
-                tabs = tabs.push(ui::tab(&t.label, active, Message::Tab(t.id.clone())));
-            }
-            page = page.push(tabs);
-        }
         if let Some(n) = &now.notice {
             page = page.push(widget::text::caption(n.as_str()).width(Length::Fill));
         }
@@ -856,14 +864,18 @@ impl Application for App {
             return page.push(notice(title, body.to_owned(), buttons)).into();
         }
         let identity = Identity { monogram: config.monogram.clone(), tint: ui::tint(config) };
-        page.push(Grid::new(
-            panes,
-            identity,
-            self.dialog.is_none(),
-            &self.cache,
-            self.metrics,
-            Message::Grid,
-        ))
+        // A margin all round, as in Rex, so no card runs into the window's edge.
+        page.push(
+            widget::container(Grid::new(
+                panes,
+                identity,
+                self.dialog.is_none(),
+                &self.cache,
+                self.metrics,
+                Message::Grid,
+            ))
+            .padding([0, 12, 12, 0]),
+        )
         .into()
     }
 }

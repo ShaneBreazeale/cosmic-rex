@@ -142,51 +142,101 @@ fn card_class() -> theme::Button {
     }
 }
 
-/// A tab pill: neutral, filled when active.
-pub fn tab<'a>(label: &'a str, active: bool, on_press: Message) -> Element<'a, Message> {
-    widget::button::custom(widget::text::body(label))
-        .padding([6, 14])
-        .class(tab_class(active))
-        .on_press(on_press)
+/// Where you are, in the title bar: the session, and under it the box.
+pub fn place<'a>(session: Option<&'a str>, host: &'a str) -> Element<'a, Message> {
+    let mut lines = widget::column::with_capacity(2);
+    if let Some(s) = session {
+        lines = lines.push(one_line(widget::text::heading(s)));
+    }
+    lines.push(one_line(faint(host))).into()
+}
+
+/// The tab strip, as in Rex: one tray across the title bar, the open tab a raised pill, the others
+/// plain, with a hairline between two that are both closed.
+pub fn tabs<'a>(tabs: Vec<(&'a str, bool, Message)>) -> Element<'a, Message> {
+    let mut strip = widget::row::with_capacity(tabs.len() * 2).align_y(Alignment::Center);
+    for (i, (label, active, on_press)) in tabs.iter().enumerate() {
+        let quiet_pair = i > 0 && !active && !tabs[i - 1].1;
+        strip = strip.push(if quiet_pair { divider() } else { widget::space::horizontal().width(1).into() });
+        let face = widget::row::with_capacity(2)
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .push(tab_icon(*active))
+            .push(
+                one_line(widget::text::body(*label))
+                    .width(Length::Fill)
+                    .align_y(cosmic::iced::alignment::Vertical::Center),
+            );
+        strip = strip.push(
+            widget::button::custom(face)
+                .padding([5, 12, 5, 6])
+                .width(Length::Fixed(180.0))
+                .class(tab_class(*active))
+                .on_press(on_press.clone()),
+        );
+    }
+    widget::container(strip)
+        .padding(3)
+        .class(theme::Container::custom(|t: &Theme| {
+            let c = t.cosmic();
+            let on: Color = c.on_bg_color().into();
+            widget::container::Style {
+                background: Some(Background::Color(Color { a: 0.05, ..on })),
+                border: Border { radius: c.radius_xl().into(), ..Default::default() },
+                ..Default::default()
+            }
+        }))
+        .into()
+}
+
+/// A small terminal tile: which program a tab holds is not known here, so every tab is a terminal.
+fn tab_icon<'a>(active: bool) -> Element<'a, Message> {
+    widget::container(widget::text::caption(">_").size(10))
+        .center_x(Length::Fixed(24.0))
+        .center_y(Length::Fixed(20.0))
+        .class(theme::Container::custom(move |t: &Theme| {
+            let c = t.cosmic();
+            let on: Color = c.on_bg_color().into();
+            widget::container::Style {
+                text_color: Some(Color { a: if active { 0.95 } else { 0.7 }, ..on }),
+                background: Some(Background::Color(Color { a: 0.1, ..on })),
+                border: Border { radius: c.radius_xs().into(), ..Default::default() },
+                ..Default::default()
+            }
+        }))
+        .into()
+}
+
+fn divider<'a>() -> Element<'a, Message> {
+    widget::container(widget::space::vertical().height(16))
+        .width(1)
+        .class(theme::Container::custom(|t: &Theme| widget::container::Style {
+            background: Some(Background::Color(Color { a: 0.15, ..Color::from(t.cosmic().on_bg_color()) })),
+            ..Default::default()
+        }))
         .into()
 }
 
 fn tab_class(active: bool) -> theme::Button {
-    let style = |t: &Theme, fill: f32, text: f32| {
+    let style = move |t: &Theme, fill: f32, text: f32| {
         let c = t.cosmic();
         let on: Color = c.on_bg_color().into();
         let mut s = widget::button::Style::new();
         s.background = Some(Background::Color(Color { a: fill, ..on }));
         s.border_radius = c.radius_xl().into();
+        if active {
+            s.border_width = 1.0;
+            s.border_color = Color { a: 0.14, ..on };
+        }
         s.text_color = Some(Color { a: text, ..on });
         s
     };
-    let (rest, text) = if active { (0.14, 1.0) } else { (0.0, 0.75) };
+    let (rest, text) = if active { (0.12, 1.0) } else { (0.0, 0.65) };
     theme::Button::Custom {
         active: Box::new(move |_, t| style(t, rest, text)),
         disabled: Box::new(move |t| style(t, rest, 0.5)),
         hovered: Box::new(move |_, t| style(t, rest + 0.06, 1.0)),
         pressed: Box::new(move |_, t| style(t, rest + 0.1, 1.0)),
-    }
-}
-
-/// A tab under its session: text only, brighter when it is the one on screen.
-fn tab_row_class(active: bool) -> theme::Button {
-    let style = |t: &Theme, fill: f32, text: f32| {
-        let c = t.cosmic();
-        let on: Color = c.on_primary_container_color().into();
-        let mut s = widget::button::Style::new();
-        s.background = Some(Background::Color(Color { a: fill, ..on }));
-        s.border_radius = c.radius_s().into();
-        s.text_color = Some(Color { a: text, ..on });
-        s
-    };
-    let text = if active { 1.0 } else { 0.6 };
-    theme::Button::Custom {
-        active: Box::new(move |_, t| style(t, 0.0, text)),
-        disabled: Box::new(move |t| style(t, 0.0, 0.5)),
-        hovered: Box::new(move |_, t| style(t, 0.06, 1.0)),
-        pressed: Box::new(move |_, t| style(t, 0.12, 1.0)),
     }
 }
 
@@ -289,21 +339,6 @@ pub fn sidebar<'a>(rows: Vec<BoxRow<'a>>, current: Option<&str>) -> Element<'a, 
                     .class(row_class(selected))
                     .on_press_maybe(online.then(|| Message::OpenSession(id.clone(), s.id.clone()))),
             );
-            if selected && now.tabs.len() > 1 {
-                for t in &now.tabs {
-                    let active = now.tab.as_ref() == Some(&t.id);
-                    list = list.push(
-                        widget::button::custom(
-                            one_line(widget::text::caption(t.label.as_str()))
-                                .width(Length::Fill),
-                        )
-                        .padding([4, 8, 4, 44])
-                        .width(Length::Fill)
-                        .class(tab_row_class(active))
-                        .on_press(Message::Tab(t.id.clone())),
-                    );
-                }
-            }
         }
         if online && now.sessions.is_empty() {
             list = list.push(widget::container(muted("No sessions")).padding([2, 8, 6, 40]));
@@ -332,9 +367,8 @@ pub fn sidebar<'a>(rows: Vec<BoxRow<'a>>, current: Option<&str>) -> Element<'a, 
         .class(theme::Container::custom(|t: &Theme| {
             let c = t.cosmic();
             widget::container::Style {
-                text_color: Some(c.on_primary_container_color().into()),
-                background: Some(Background::Color(c.primary_container_color().into())),
-                border: Border { radius: c.radius_s().into(), ..Default::default() },
+                // On the window itself, as in Rex: the panes are the raised surfaces.
+                text_color: Some(c.on_bg_color().into()),
                 ..Default::default()
             }
         }))

@@ -27,8 +27,11 @@ use std::{
 use crate::keys;
 
 pub const PAD: f32 = 10.0;
-const HEADER: f32 = 28.0;
-const GAP: f32 = 8.0;
+const HEADER: f32 = 34.0;
+const GAP: f32 = 12.0;
+/// One header button, and the order they sit in.
+const BUTTON: f32 = 26.0;
+const BUTTONS: [Shortcut; 3] = [Shortcut::SplitRight, Shortcut::SplitDown, Shortcut::Zoom];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Metrics {
@@ -45,7 +48,7 @@ impl Metrics {
         let width = advance.round().max(1.0);
         Self {
             size: wanted * width / advance,
-            cell: Size::new(width, (wanted * 1.3).round()),
+            cell: Size::new(width, (wanted * 1.45).round()),
         }
     }
 
@@ -210,6 +213,33 @@ fn color(rgb: u32) -> Color {
     Color::from_rgb8(r, g, b)
 }
 
+/// A terminal's own background, unless it is the default near-black on a dark desktop: that one
+/// becomes the raised surface, so panes read as cards. Other grounds are left as they are.
+fn ground(bg: u32, theme: &Theme) -> Color {
+    let (r, g, b) = bytes(bg);
+    let c = theme.cosmic();
+    if c.is_dark && u32::from(r) + u32::from(g) + u32::from(b) < 3 * 24 {
+        c.primary_container_color().into()
+    } else {
+        color(bg)
+    }
+}
+
+/// The header buttons, drawn from rules rather than font glyphs, which vary by machine.
+fn glyph(r: &mut Renderer, b: Rectangle, s: Shortcut, ink: Color) {
+    let frame = Rectangle { x: b.center_x() - 7.0, y: b.center_y() - 5.5, width: 14.0, height: 11.0 };
+    let line = |r: &mut Renderer, bounds: Rectangle| {
+        r.fill_quad(renderer::Quad { bounds, ..Default::default() }, Background::Color(ink));
+    };
+    let border = Border { color: ink, width: 1.2, radius: 2.0.into() };
+    r.fill_quad(renderer::Quad { bounds: frame, border, ..Default::default() }, Background::Color(Color::TRANSPARENT));
+    match s {
+        Shortcut::SplitRight => line(r, Rectangle { x: frame.center_x() - 0.5, width: 1.2, ..frame }),
+        Shortcut::SplitDown => line(r, Rectangle { y: frame.center_y() - 0.5, height: 1.2, ..frame }),
+        _ => line(r, Rectangle { x: frame.x + 3.0, y: frame.y + 3.0, width: frame.width - 6.0, height: frame.height - 6.0 }),
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Action {
     Focus(String),
@@ -221,6 +251,8 @@ pub enum Action {
     Resize(String, u16, u16),
     /// Take this pane's size, from a click on its size chip.
     Fit(String),
+    /// A header button: this pane, not whichever has the keyboard.
+    Pane(String, Shortcut),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -277,20 +309,47 @@ impl<'a, M> Grid<'a, M> {
         }
     }
 
+    /// Split right, split down and zoom at the header's end; none on a pane too narrow for them.
+    fn buttons(&self, rect: Rectangle) -> Vec<(Rectangle, Shortcut)> {
+        if rect.width < 300.0 {
+            return Vec::new();
+        }
+        let end = rect.x + rect.width - 8.0;
+        let y = rect.y + (HEADER - BUTTON) / 2.0;
+        (BUTTONS.iter().enumerate())
+            .map(|(i, s)| {
+                let x = end - (BUTTONS.len() - i) as f32 * BUTTON;
+                (Rectangle { x, y, width: BUTTON, height: BUTTON }, *s)
+            })
+            .collect()
+    }
+
+    /// Where the header's own text and chips must end.
+    fn header_end(&self, rect: Rectangle) -> f32 {
+        self.buttons(rect).first().map_or(rect.x + rect.width - 8.0, |(b, _)| b.x - 4.0)
+    }
+
     fn chip(&self, pane: &PaneView, rect: Rectangle) -> Option<(Rectangle, String)> {
         let grid = pane.frame.as_ref().map(|f| format!(" · {}×{}", f.cols(), f.rows())).unwrap_or_default();
-        let text = match pane.size {
+        let (long, short) = match pane.size {
             Owner::Here => return None,
-            Owner::Elsewhere => format!("Sized elsewhere{grid} · Fit here"),
-            Owner::Unclaimed => format!("Unclaimed{grid} · Fit here"),
+            Owner::Elsewhere => ("Sized elsewhere", "Elsewhere"),
+            Owner::Unclaimed => ("Unclaimed", "Unclaimed"),
         };
+        let end = self.header_end(rect) - 22.0;
         // Shortened rather than dropped: whose size this is must never go unsaid.
-        [text, "⊡ Fit here".to_owned(), "⊡".to_owned()].into_iter().find_map(|text| {
+        [
+            format!("{long}{grid} · Fit here"),
+            format!("{long} · Fit here"),
+            format!("{short} · Fit here"),
+            format!("⊡ {short}"),
+            "⊡".to_owned(),
+        ]
+        .into_iter()
+        .find_map(|text| {
             let width = text.chars().count() as f32 * 5.9 + 18.0;
-            (width + 130.0 < rect.width || text == "⊡").then(|| {
-                let x = rect.x + rect.width - width - 28.0;
-                (Rectangle { x, y: rect.y + 4.0, width, height: HEADER - 8.0 }, text)
-            })
+            let fits = width + 100.0 < end - rect.x || text == "⊡";
+            fits.then_some((Rectangle { x: end - width, y: rect.y + 7.0, width, height: HEADER - 14.0 }, text))
         })
     }
 
@@ -380,7 +439,11 @@ impl<M> Widget<M, Theme, Renderer> for Grid<'_, M> {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 let Some(p) = cursor.position_over(bounds) else { return };
                 let Some(pane) = self.at(p, bounds) else { return };
-                if self.chip(pane, self.rect(pane, bounds)).is_some_and(|(c, _)| c.contains(p)) {
+                let rect = self.rect(pane, bounds);
+                if let Some((_, s)) = self.buttons(rect).into_iter().find(|(b, _)| b.contains(p)) {
+                    shell.publish((self.on)(Action::Pane(pane.block.clone(), s)));
+                    shell.capture_event();
+                } else if self.chip(pane, rect).is_some_and(|(c, _)| c.contains(p)) {
                     shell.publish((self.on)(Action::Fit(pane.block.clone())));
                     shell.capture_event();
                 } else if !pane.focused {
@@ -431,7 +494,9 @@ impl<M> Widget<M, Theme, Renderer> for Grid<'_, M> {
         if let Some(p) = cursor.position_over(bounds) {
             let Some(pane) = self.at(p, bounds) else { return mouse::Interaction::None };
             let rect = self.rect(pane, bounds);
-            if self.chip(pane, rect).is_some_and(|(c, _)| c.contains(p)) {
+            if self.chip(pane, rect).is_some_and(|(c, _)| c.contains(p))
+                || self.buttons(rect).iter().any(|(b, _)| b.contains(p))
+            {
                 mouse::Interaction::Pointer
             } else if p.y < rect.y + HEADER {
                 mouse::Interaction::None
@@ -450,24 +515,36 @@ impl<M> Widget<M, Theme, Renderer> for Grid<'_, M> {
         theme: &Theme,
         _: &renderer::Style,
         layout: Layout<'_>,
-        _: mouse::Cursor,
+        cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
+        let bounds = layout.bounds();
+        let over = cursor.position_over(bounds).and_then(|p| Some((p, &self.at(p, bounds)?.block)));
         for pane in &self.panes {
-            let rect = self.rect(pane, layout.bounds());
+            let rect = self.rect(pane, bounds);
             let Some(clip) = rect.intersection(viewport) else { continue };
+            let hover = over.filter(|(_, b)| **b == pane.block).map(|(p, _)| p);
             // A layer per pane keeps a wider server-sized grid from spilling into neighbours.
-            renderer.with_layer(clip, |r| self.draw_pane(r, pane, rect, clip, theme));
+            renderer.with_layer(clip, |r| self.draw_pane(r, pane, rect, clip, theme, hover));
         }
     }
 }
 
 impl<M> Grid<'_, M> {
-    fn draw_pane(&self, r: &mut Renderer, pane: &PaneView, rect: Rectangle, clip: Rectangle, theme: &Theme) {
+    #[allow(clippy::too_many_arguments)]
+    fn draw_pane(
+        &self,
+        r: &mut Renderer,
+        pane: &PaneView,
+        rect: Rectangle,
+        clip: Rectangle,
+        theme: &Theme,
+        hover: Option<Point>,
+    ) {
         let m = self.metrics;
         let c = theme.cosmic();
         let accent: Color = c.accent_color().into();
-        let radius = c.radius_s();
+        let radius = c.radius_m();
         let fill = |r: &mut Renderer, bounds: Rectangle, c: Color| {
             r.fill_quad(renderer::Quad { bounds, ..Default::default() }, Background::Color(c));
         };
@@ -499,32 +576,46 @@ impl<M> Grid<'_, M> {
         };
         // One surface: the header sits on the terminal's own background.
         let (ground, ink) = pane.frame.as_ref().map_or_else(
-            || (Color::from(c.bg_color()), Color::from(c.on_bg_color())),
-            |f| (color(f.bg()), color(f.fg())),
+            || (Color::from(c.primary_container_color()), Color::from(c.on_bg_color())),
+            |f| (ground(f.bg(), theme), color(f.fg())),
         );
         rounded(r, rect, ground, radius);
-        let on = Color { a: if pane.focused { 1.0 } else { 0.7 }, ..ink };
-        let chip = Rectangle { x: rect.x + 8.0, y: rect.y + 5.0, width: 22.0, height: 18.0 };
+        let on = Color { a: if pane.focused { 1.0 } else { 0.62 }, ..ink };
+        let chip = Rectangle { x: rect.x + 10.0, y: rect.y + 8.0, width: 22.0, height: 18.0 };
         rounded(r, chip, self.identity.tint, c.radius_xs());
         label(r, &self.identity.monogram, chip.x + 3.0, 20.0, 11.0, Color::WHITE);
         let size = self.chip(pane, rect);
-        let end = size.as_ref().map_or(rect.x + rect.width - 28.0, |(c, _)| c.x);
-        label(r, &pane.title, rect.x + 38.0, (end - rect.x - 46.0).max(0.0), 13.0, on);
+        let busy = pane.state != rex_backend::AgentState::Idle;
+        let last = self.header_end(rect);
+        let end = size.as_ref().map_or(last - if busy { 22.0 } else { 0.0 }, |(c, _)| c.x);
+        label(r, &pane.title, rect.x + 42.0, (end - rect.x - 50.0).max(0.0), 14.0, on);
         if let Some((bounds, text)) = &size {
             rounded(r, *bounds, Color { a: 0.1, ..ink }, c.radius_xl());
             label(r, text, bounds.x + 8.0, bounds.width - 8.0, 11.0, on);
         }
-        if pane.state != rex_backend::AgentState::Idle {
+        if busy {
             let color = crate::ui::color(pane.state, theme);
-            label(r, crate::ui::shape(pane.state), rect.x + rect.width - 22.0, 18.0, 12.0, color);
+            label(r, crate::ui::shape(pane.state), last - 18.0, 18.0, 12.0, color);
+        }
+        // Quiet until wanted: the buttons show on the pane with the keyboard or under the pointer.
+        if hover.is_some() || pane.focused {
+            for (b, s) in self.buttons(rect) {
+                if hover.is_some_and(|p| b.contains(p)) {
+                    rounded(r, b, Color { a: 0.1, ..ink }, c.radius_s());
+                }
+                glyph(r, b, s, Color { a: 0.75, ..ink });
+            }
         }
         let body = Rectangle { y: rect.y + HEADER, height: (rect.height - HEADER).max(0.0), ..rect };
         let outline = |r: &mut Renderer| {
-            if pane.focused {
+            // A hairline on every card; a soft accent one only where the keyboard is.
+            let (color, width) =
+                if pane.focused { (Color { a: 0.5, ..accent }, 1.0) } else { (Color { a: 0.08, ..ink }, 1.0) };
+            {
                 r.fill_quad(
                     renderer::Quad {
                         bounds: rect,
-                        border: Border { color: accent, width: 1.5, radius: radius.into() },
+                        border: Border { color, width, radius: radius.into() },
                         ..Default::default()
                     },
                     Background::Color(Color::TRANSPARENT),
@@ -595,7 +686,7 @@ impl<M> Grid<'_, M> {
             if guessed > 0 {
                 // Underlined until the server confirms it.
                 let span = cell(x as usize, y as usize, guessed);
-                fill(r, span, color(frame.bg()));
+                fill(r, span, ground);
                 r.fill_raw(Raw {
                     buffer: Arc::downgrade(&self.cache.guess(&pane.block, &pane.guess, m)),
                     position: span.position(),
