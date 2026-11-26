@@ -15,7 +15,7 @@ use cosmic::{
 use futures_util::StreamExt as _;
 use grid::{Action, Cache, Grid, Identity, Metrics, Shortcut, Tab};
 use rex_backend::{
-    Agent, AgentState, AnswerKey, BoxConfig, Boxes, Host, Outcome, PaneView, Question, Reply, Snapshot, Split, KeyCheck, TailnetMachine, Wake,
+    Agent, AgentState, AnswerKey, BoxConfig, Boxes, Host, Outcome, PaneView, Question, Reply, Snapshot, Split, KeyCheck, KeyState, Problem, HostKey, Started, TailnetMachine, Wake,
     demo::Demo,
 };
 use std::{
@@ -146,6 +146,23 @@ enum Message {
     Checked(String, KeyCheck),
     AskKeysOnly,
     KeysOnly,
+    /// How this computer's key stands, for the open key sheet.
+    KeyStateIs(Option<KeyState>),
+    AddToAgent,
+    /// Scan this box's host key, to compare before trusting it.
+    ScanHostKey(String),
+    Scanned(u64, Result<HostKey, String>),
+    TrustHostKey,
+    Trusted(u64, Result<(), String>),
+    /// Ask before starting this box's personal Rex server.
+    AskStart(String),
+    StartServer,
+    StartedServer(u64, Result<Started, String>),
+    /// Check that installing Rex applies to this box, then run it in a terminal here.
+    InstallRex(String),
+    InstallReady(String, Result<Vec<String>, String>),
+    /// Readdress this box to where its server was found.
+    UseEndpoint(String, String),
     SaveBox,
     CancelDialog,
     AskRemove(String),
@@ -200,7 +217,13 @@ enum Dialog {
     CloseSession { config: BoxConfig, session: String, label: String, tabs: Option<usize>, number: u64, armed: bool },
     RenameSession { config: BoxConfig, session: String, label: String },
     /// This computer's key and an `ssh://` box. `check` is the last check of it, if any.
-    Key { config: BoxConfig, checking: bool, check: Option<KeyCheck> },
+    Key { config: BoxConfig, checking: bool, check: Option<KeyCheck>, state: Option<KeyState> },
+    /// A box's scanned host key, to compare before trusting. Trust stays inert until `armed`.
+    HostKey { config: BoxConfig, number: u64, key: Option<Result<HostKey, String>>, armed: bool, trusting: bool },
+    /// Starting this box's personal server, once, after the command is shown.
+    Start { config: BoxConfig, number: u64, preview: Result<String, String>, running: bool, result: Option<Result<Started, String>> },
+    /// Words about a step that couldn't run.
+    Said { title: String, body: String },
     /// Turns off password login on the box, so it asks, and stays inert until `armed`.
     KeysOnly { config: BoxConfig, number: u64, armed: bool },
 }
@@ -334,6 +357,7 @@ impl App {
         if self.demo.is_some() {
             return Task::none();
         }
+        self.boxes.pause_stuck();
         self.now = self.boxes.snapshots();
         let keep: Vec<String> =
             self.here().map_or_else(Vec::new, |(_, s)| s.panes.iter().map(|p| p.block.clone()).collect());
@@ -394,10 +418,23 @@ impl App {
         Task::batch([shown, self.refresh()])
     }
 
+    /// Connect this box again now, after a step that may have fixed it.
+    fn reconnect(&mut self, id: &str) {
+        match self.boxes.host(id) {
+            Some(host) => host.reconnect(),
+            None => self.boxes.connect(id, None),
+        }
+    }
+
     /// Put words on the open key sheet.
     fn key_said(&mut self, said: KeyCheck) -> Task<Message> {
-        if let Some(Dialog::Key { checking, check, .. }) = &mut self.dialog {
-            (*checking, *check) = (false, Some(said));
+        match &mut self.dialog {
+            Some(Dialog::Key { checking, check, .. }) => (*checking, *check) = (false, Some(said)),
+            _ => {
+                if let KeyCheck::Fails(body) = said {
+                    self.dialog = Some(Dialog::Said { title: "That didn't start".into(), body });
+                }
+            }
         }
         Task::none()
     }
@@ -856,7 +893,7 @@ impl Application for App {
                 )))
                 .secondary_action(cancel())
                 .into(),
-            Dialog::Key { config, checking, check } => {
+            Dialog::Key { config, checking, check, state } => {
                 let key = rex_backend::own_key();
                 let mut steps = widget::column::with_capacity(4).spacing(8);
                 steps = steps.push(widget::text::body(match &key {
@@ -876,10 +913,17 @@ impl Application for App {
                 if let Some(said) = said {
                     steps = steps.push(widget::text::body(said));
                 }
+                let locked = *state == Some(KeyState::Locked);
+                if locked {
+                    steps = steps.push(widget::text::body(
+                        "Your key has a passphrase and the SSH agent doesn't hold it, so connections can't use it. Add it to the agent; ssh-add asks for the passphrase once.",
+                    ));
+                }
                 let mut buttons = widget::row::with_capacity(4).spacing(8);
                 buttons = match key {
                     None => buttons.push(widget::button::suggested("Make a key").on_press(Message::MakeKey)),
                     Some(_) => buttons
+                        .push_maybe(locked.then(|| widget::button::suggested("Add to SSH agent").on_press(Message::AddToAgent)))
                         .push(widget::button::standard("Install key").on_press(Message::InstallKey))
                         .push(widget::button::standard("Check key").on_press_maybe((!checking).then_some(Message::CheckKey))),
                 };
@@ -904,6 +948,61 @@ impl Application for App {
                         .on_press_maybe(armed.then_some(Message::KeysOnly)),
                 )
                 .secondary_action(cancel())
+                .into(),
+            Dialog::HostKey { config, key, armed, trusting, .. } => {
+                let (body, can) = match key {
+                    None => ("Asking the box for its key…".to_owned(), false),
+                    Some(Err(why)) => (why.clone(), false),
+                    Some(Ok(k)) => (
+                        format!(
+                            "{} says its {} key is\n\n{}\n\nCompare it with the box's own: on it, run ssh-keygen -lf on the matching /etc/ssh/ssh_host_*_key.pub. On a tailnet, the admin console lists it too. Trusting adds it to {} for {}.",
+                            config.label, k.key_type(), k.fingerprint(), k.file(), k.name()
+                        ),
+                        true,
+                    ),
+                };
+                widget::dialog()
+                    .title(format!("Trust {}'s host key?", config.label))
+                    .body(body)
+                    .primary_action(
+                        widget::button::suggested(if *trusting { "Trusting…" } else { "Trust" })
+                            .on_press_maybe((can && *armed && !trusting).then_some(Message::TrustHostKey)),
+                    )
+                    .secondary_action(cancel())
+                    .into()
+            }
+            Dialog::Start { config, preview, running, result, .. } => {
+                let body = match (result, preview) {
+                    (Some(Ok(Started::Ready)), _) => "It answered. Connecting again now.".to_owned(),
+                    (Some(Ok(Started::Elsewhere { reason, .. })), _) => reason.clone(),
+                    (Some(Err(why)), _) => why.clone(),
+                    (None, Ok(command)) => format!(
+                        "This runs once, on this computer:\n\n{command}\n\nRex is already installed there; this starts its personal server for your login. Nothing is set to start it again."
+                    ),
+                    (None, Err(why)) => why.clone(),
+                };
+                let mut dialog = widget::dialog().title(format!("Start Rex on {}?", config.label)).body(body);
+                dialog = match result {
+                    None => dialog
+                        .primary_action(
+                            widget::button::suggested(if *running { "Starting…" } else { "Start" })
+                                .on_press_maybe((preview.is_ok() && !running).then_some(Message::StartServer)),
+                        )
+                        .secondary_action(cancel()),
+                    Some(Ok(Started::Elsewhere { endpoint: Some(at), .. })) => dialog
+                        .primary_action(
+                            widget::button::suggested("Use that address")
+                                .on_press(Message::UseEndpoint(config.id.clone(), at.clone())),
+                        )
+                        .secondary_action(cancel()),
+                    Some(_) => dialog.primary_action(widget::button::standard("Done").on_press(Message::CancelDialog)),
+                };
+                dialog.into()
+            }
+            Dialog::Said { title, body } => widget::dialog()
+                .title(title.as_str())
+                .body(body.as_str())
+                .primary_action(widget::button::standard("Done").on_press(Message::CancelDialog))
                 .into(),
         })
     }
@@ -1136,7 +1235,8 @@ impl Application for App {
                     Dialog::CloseTab { number, armed, .. }
                     | Dialog::CloseSession { number, armed, .. }
                     | Dialog::ClosePane { number, armed, .. }
-                    | Dialog::KeysOnly { number, armed, .. },
+                    | Dialog::KeysOnly { number, armed, .. }
+                    | Dialog::HostKey { number, armed, .. },
                 ) = &mut self.dialog
                     && *number == n
                 {
@@ -1257,7 +1357,8 @@ impl Application for App {
                 }
             }
             Message::KeySheet(id) => {
-                self.dialog = self.boxes.config(&id).cloned().map(|config| Dialog::Key { config, checking: false, check: None });
+                self.dialog = self.boxes.config(&id).cloned().map(|config| Dialog::Key { config, checking: false, check: None, state: None });
+                return Task::perform(rex_backend::key_state(), |state| cosmic::Action::App(Message::KeyStateIs(state)));
             }
             Message::MakeKey => {
                 return match rex_backend::make_key_program() {
@@ -1284,15 +1385,16 @@ impl Application for App {
                 });
             }
             Message::Checked(id, found) => {
-                if let Some(Dialog::Key { config, checking, check }) = &mut self.dialog
+                if let Some(Dialog::Key { config, checking, check, .. }) = &mut self.dialog
                     && config.id == id
                 {
                     (*checking, *check) = (false, Some(found));
+                    return Task::perform(rex_backend::key_state(), |state| cosmic::Action::App(Message::KeyStateIs(state)));
                 }
             }
             Message::AskKeysOnly => {
                 // Only from a sheet whose last check found the key working.
-                let Some(Dialog::Key { config, check: Some(KeyCheck::Works), checking: false }) = &self.dialog else {
+                let Some(Dialog::Key { config, check: Some(KeyCheck::Works), checking: false, .. }) = &self.dialog else {
                     return Task::none();
                 };
                 self.sheets += 1;
@@ -1308,10 +1410,125 @@ impl Application for App {
                 return match rex_backend::keys_only_program(&config.endpoint) {
                     Ok(program) => self.run_here(&format!("Keys only on {}", config.label), program),
                     Err(e) => {
-                        self.dialog = Some(Dialog::Key { config, checking: false, check: Some(KeyCheck::Fails(e)) });
+                        self.dialog = Some(Dialog::Key { config, checking: false, check: Some(KeyCheck::Fails(e)), state: None });
                         Task::none()
                     }
                 };
+            }
+            Message::KeyStateIs(found) => {
+                if let Some(Dialog::Key { state, .. }) = &mut self.dialog {
+                    *state = found;
+                }
+            }
+            Message::AddToAgent => {
+                return match rex_backend::add_to_agent_program() {
+                    Ok(program) => self.run_here("Add key to SSH agent", program),
+                    Err(e) => self.key_said(KeyCheck::Fails(e)),
+                };
+            }
+            Message::ScanHostKey(id) => {
+                let Some(config) = self.boxes.config(&id).cloned() else { return Task::none() };
+                self.sheets += 1;
+                let number = self.sheets;
+                let endpoint = config.endpoint.clone();
+                self.dialog = Some(Dialog::HostKey { config, number, key: None, armed: false, trusting: false });
+                return Task::perform(rex_backend::scan_host_key(endpoint), move |key| {
+                    cosmic::Action::App(Message::Scanned(number, key))
+                });
+            }
+            Message::Scanned(n, found) => {
+                if let Some(Dialog::HostKey { number, key, .. }) = &mut self.dialog
+                    && *number == n
+                {
+                    let ok = found.is_ok();
+                    *key = Some(found);
+                    // Readable for a moment before Trust takes a click.
+                    if ok {
+                        return Task::perform(rex_backend::pause(Duration::from_millis(600)), move |()| {
+                            cosmic::Action::App(Message::DialogArmed(n))
+                        });
+                    }
+                }
+            }
+            Message::TrustHostKey => {
+                let Some(Dialog::HostKey { number, key: Some(Ok(key)), armed: true, trusting, .. }) = &mut self.dialog else {
+                    return Task::none();
+                };
+                *trusting = true;
+                let (n, key) = (*number, key.clone());
+                return Task::perform(rex_backend::trust_host_key(key), move |done| {
+                    cosmic::Action::App(Message::Trusted(n, done))
+                });
+            }
+            Message::Trusted(n, done) => {
+                let Some(Dialog::HostKey { number, config, key, trusting, .. }) = &mut self.dialog else { return Task::none() };
+                if *number != n {
+                    return Task::none();
+                }
+                match done {
+                    Ok(()) => {
+                        let id = config.id.clone();
+                        self.dialog = None;
+                        self.reconnect(&id);
+                        return self.refresh();
+                    }
+                    Err(why) => (*trusting, *key) = (false, Some(Err(why))),
+                }
+            }
+            Message::AskStart(id) => {
+                let Some(config) = self.boxes.config(&id).cloned() else { return Task::none() };
+                self.sheets += 1;
+                let preview = rex_backend::start_preview(&config.endpoint);
+                self.dialog = Some(Dialog::Start { config, number: self.sheets, preview, running: false, result: None });
+            }
+            Message::StartServer => {
+                let Some(Dialog::Start { config, number, preview: Ok(_), running: running @ false, result: None }) = &mut self.dialog
+                else {
+                    return Task::none();
+                };
+                *running = true;
+                let (n, endpoint) = (*number, config.endpoint.clone());
+                return Task::perform(rex_backend::start_server(endpoint), move |r| {
+                    cosmic::Action::App(Message::StartedServer(n, r))
+                });
+            }
+            Message::StartedServer(n, found) => {
+                if let Some(Dialog::Start { config, number, running, result, .. }) = &mut self.dialog
+                    && *number == n
+                {
+                    let ready = matches!(found, Ok(Started::Ready));
+                    (*running, *result) = (false, Some(found));
+                    if ready {
+                        let id = config.id.clone();
+                        self.reconnect(&id);
+                        return self.refresh();
+                    }
+                }
+            }
+            Message::InstallRex(id) => {
+                let Some(config) = self.boxes.config(&id) else { return Task::none() };
+                let endpoint = config.endpoint.clone();
+                return Task::perform(rex_backend::install_program(endpoint), move |r| {
+                    cosmic::Action::App(Message::InstallReady(id.clone(), r))
+                });
+            }
+            Message::InstallReady(id, found) => {
+                let Some(config) = self.boxes.config(&id).cloned() else { return Task::none() };
+                match found {
+                    Ok(program) => return self.run_here(&format!("Install Rex on {}", config.label), program),
+                    Err(why) => {
+                        self.dialog = Some(Dialog::Said { title: format!("Rex can't be installed on {} from here", config.label), body: why });
+                    }
+                }
+            }
+            Message::UseEndpoint(id, endpoint) => {
+                self.dialog = self.boxes.config(&id).map(|c| Dialog::Add {
+                    label: c.label.clone(),
+                    address: endpoint,
+                    error: None,
+                    editing: Some(c.id.clone()),
+                    tailnet: None,
+                });
             }
             Message::DraftThisComputer => {
                 if let Some(Dialog::Add { address, error, .. }) = &mut self.dialog {
@@ -1566,8 +1783,14 @@ impl Application for App {
             } else {
                 (
                     format!("Not connected to {}", config.label),
-                    vec![
-                        widget::button::suggested("Try again")
+                    fix(config, now.problem.as_ref())
+                        .into_iter()
+                        .chain([
+                        if fix(config, now.problem.as_ref()).is_some() {
+                            widget::button::standard("Try again")
+                        } else {
+                            widget::button::suggested("Try again")
+                        }
                             .on_press(Message::Connect(config.id.clone()))
                             .into(),
                         widget::button::standard("Disconnect")
@@ -1579,9 +1802,8 @@ impl Application for App {
                         widget::button::text("Remove…")
                             .on_press(Message::AskRemove(config.id.clone()))
                             .into(),
-                    ]
-                    .into_iter()
-                    .chain(config.is_ssh().then(|| {
+                    ])
+                    .chain((config.is_ssh() && now.problem != Some(Problem::Auth)).then(|| {
                         widget::button::standard("SSH key…").on_press(Message::KeySheet(config.id.clone())).into()
                     }))
                     .collect(),
@@ -1591,6 +1813,10 @@ impl Application for App {
                 "Shells run in this app and end when it closes."
             } else if now.connected {
                 "Choose one in the sidebar."
+            } else if now.problem == Some(Problem::ChangedHostKey) {
+                "Its host key changed since this computer trusted it. That happens when a machine is reinstalled, and also when something is in the way, so it is never accepted from here. Check with whoever runs it; if the change is expected, remove the old key in a terminal with ssh-keygen -R and the box's name, then try again."
+            } else if let Some(Problem::NoServer { start: false, install: false }) = now.problem {
+                "No Rex server answers there, and it can't be set up from here: in-app setup is for a Linux login that isn't root. Set Rex up on it by hand, or name its socket in the address."
             } else {
                 now.status.as_str()
             };
@@ -1662,4 +1888,17 @@ fn notice<'a>(
     )
     .center(Length::Fill)
     .into()
+}
+
+/// The step that fixes why this box didn't connect, when there is one.
+fn fix<'a>(config: &BoxConfig, problem: Option<&Problem>) -> Option<Element<'a, Message>> {
+    let id = config.id.clone();
+    let (label, message) = match problem? {
+        Problem::Auth => ("SSH key…", Message::KeySheet(id)),
+        Problem::UnknownHostKey => ("Check host key…", Message::ScanHostKey(id)),
+        Problem::NoServer { start: true, .. } => ("Start Rex…", Message::AskStart(id)),
+        Problem::NoServer { install: true, .. } => ("Install Rex…", Message::InstallRex(id)),
+        Problem::ChangedHostKey | Problem::NoServer { .. } => return None,
+    };
+    Some(widget::button::suggested(label).on_press(message).into())
 }

@@ -149,6 +149,7 @@ pub fn sample() -> (Vec<crate::BoxConfig>, Vec<(String, crate::Snapshot)>) {
         since: std::time::Instant::now()
             .checked_sub(Duration::from_secs(60 * (2 + message.len() as u64 % 9))),
         progress: (state == S::Working).then_some(35),
+        live: true,
     };
     let tab = |id: &str| Tab { id: id.into(), label: id.into() };
     let studio = Snapshot {

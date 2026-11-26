@@ -287,6 +287,8 @@ pub(crate) fn selection_step(
 struct Remote {
     /// Distinguishes this connection's wakes from an earlier one to the same box.
     serial: u64,
+    /// Where an `ssh://` box points, to tell what its setup problems allow.
+    target: Option<Box<rex_rune::ssh::Target>>,
     core: HostConnection,
     input: Input,
     /// Live panes as of the last snapshot.
@@ -307,9 +309,11 @@ fn next_serial() -> u64 {
 impl Remote {
     fn connect(endpoint: String, session: Option<String>) -> Self {
         let core = HostConnection::spawn(endpoint.clone(), session, None, None, true, None);
+        let target = rex_rune::ssh::Target::parse(&endpoint).ok().flatten().map(Box::new);
         let input = Input::spawn(endpoint, core.model.clone());
         Self {
             serial: next_serial(),
+            target,
             core,
             input,
             terminals: Mutex::default(),
@@ -333,7 +337,15 @@ impl Remote {
             live.notices.clear();
             live.bells.clear();
             live.clipboard = None;
-            (Snapshot::new(&live), live.terminals.clone(), performs)
+            let mut snapshot = Snapshot::new(&live);
+            if !live.connected {
+                snapshot.problem = live
+                    .ssh_problem
+                    .as_ref()
+                    .zip(self.target.as_ref())
+                    .map(|(p, t)| crate::Problem::from_core(p, t));
+            }
+            (snapshot, live.terminals.clone(), performs)
         };
         for p in performs {
             self.send(HostCommand::PerformReply {
@@ -734,6 +746,7 @@ mod tests {
         let (input, typed) = Input::intercepted(true);
         let host = Remote {
             serial: next_serial(),
+            target: None,
             core,
             input,
             terminals: Mutex::default(),

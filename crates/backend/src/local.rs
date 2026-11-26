@@ -359,6 +359,7 @@ impl Local {
             connected: true,
             tab_panes: window.map_or(0, |w| w.leaves().len()),
             status: String::new(),
+            problem: None,
             notice: st.notice.clone(),
             sessions: st
                 .sessions

@@ -61,6 +61,57 @@ pub fn install_key_program(endpoint: &str) -> Result<Vec<String>, String> {
     Ok(in_terminal(&argv))
 }
 
+/// Whether background logins can use this computer's key without asking for anything.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyState {
+    /// No passphrase: `ssh` reads it as it is.
+    Open,
+    /// It has a passphrase, and the SSH agent holds it, so nothing is asked.
+    InAgent,
+    /// It has a passphrase and no agent holds it: connections here can't use it until
+    /// it is added, since nothing can ask for the passphrase.
+    Locked,
+}
+
+/// How this computer's key stands, or none without a key.
+pub async fn key_state() -> Option<KeyState> {
+    let (done, wait) = flume::bounded(1);
+    std::thread::spawn(move || {
+        let _ = done.send(key_state_now());
+    });
+    wait.recv_async().await.ok().flatten()
+}
+
+fn key_state_now() -> Option<KeyState> {
+    let public = own_key()?;
+    let quiet = |program: &str, args: &[&std::ffi::OsStr]| {
+        std::process::Command::new(program)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()
+    };
+    let private = public.with_extension("");
+    // An empty passphrase only opens a key that has none.
+    let open = quiet("ssh-keygen", &["-y".as_ref(), "-P".as_ref(), "".as_ref(), "-f".as_ref(), private.as_os_str()])
+        .is_some_and(|o| o.status.success());
+    if open {
+        return Some(KeyState::Open);
+    }
+    let body = std::fs::read_to_string(&public).ok()?;
+    let body = body.split_whitespace().nth(1)?.to_owned();
+    let held = quiet("ssh-add", &["-L".as_ref()])
+        .is_some_and(|o| String::from_utf8_lossy(&o.stdout).lines().any(|l| l.split_whitespace().nth(1) == Some(&body)));
+    Some(if held { KeyState::InAgent } else { KeyState::Locked })
+}
+
+/// Add this computer's key to the SSH agent; `ssh-add` asks for its passphrase.
+pub fn add_to_agent_program() -> Result<Vec<String>, String> {
+    let private = own_key().ok_or("Make a key first")?.with_extension("");
+    Ok(in_terminal(&["ssh-add", &private.to_string_lossy()]))
+}
+
 /// Log in with only this computer's key, never prompting, and see what answered.
 pub async fn check_key(endpoint: String) -> KeyCheck {
     let (done, wait) = flume::bounded(1);
@@ -178,7 +229,7 @@ fn target(endpoint: &str) -> Result<Target, String> {
 }
 
 /// Run `argv` and keep its last words on screen until Enter, since its pane closes with it.
-fn in_terminal(argv: &[&str]) -> Vec<String> {
+pub(crate) fn in_terminal(argv: &[&str]) -> Vec<String> {
     let wrapper = r#""$@"; s=$?; echo; if [ "$s" -eq 0 ]; then echo "Done."; else echo "It ended with status $s."; fi; printf "Press Enter to close. "; read -r _"#;
     ["sh", "-c", wrapper, "sh"].iter().chain(argv).map(|s| (*s).to_owned()).collect()
 }

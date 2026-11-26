@@ -1,5 +1,6 @@
 //! The saved boxes (servers) and one connection to each.
-use crate::{Host, Snapshot, Wake};
+use crate::{Host, Problem, Snapshot, Wake};
+use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use std::{
     io::Write as _,
@@ -164,6 +165,14 @@ fn check(new: &BoxConfig, others: &[BoxConfig]) -> Result<(), String> {
 pub struct Boxes {
     path: Option<PathBuf>,
     boxes: Vec<(BoxConfig, Option<Host>)>,
+    /// Boxes whose connection stopped retrying, as last seen, by id.
+    paused: HashMap<String, Snapshot>,
+}
+
+/// Each retry of these is another refused login on the box, which can get this computer
+/// banned there (fail2ban and the like), and only the person can fix them.
+fn stuck(problem: &Problem) -> bool {
+    matches!(problem, Problem::Auth | Problem::UnknownHostKey | Problem::ChangedHostKey)
 }
 
 impl Boxes {
@@ -186,12 +195,13 @@ impl Boxes {
         Ok(Self {
             path: Some(path.to_owned()),
             boxes: configs.into_iter().map(|c| (c, None)).collect(),
+            paused: HashMap::new(),
         })
     }
 
     /// Boxes for this run only; nothing is written.
     pub fn temporary(configs: Vec<BoxConfig>) -> Self {
-        Self { path: None, boxes: configs.into_iter().map(|c| (c, None)).collect() }
+        Self { path: None, boxes: configs.into_iter().map(|c| (c, None)).collect(), paused: HashMap::new() }
     }
 
     pub fn configs(&self) -> Vec<BoxConfig> {
@@ -230,6 +240,9 @@ impl Boxes {
             return Err(error);
         }
         let (config, host) = &mut self.boxes[at];
+        if config.endpoint != old.endpoint {
+            self.paused.remove(&config.id);
+        }
         if config.endpoint != old.endpoint && host.take().is_some() {
             *host = Some(Host::connect(config.endpoint.clone(), None));
         }
@@ -244,11 +257,13 @@ impl Boxes {
             self.boxes.insert(at, removed);
             return Err(error);
         }
+        self.paused.remove(id);
         Ok(())
     }
 
     /// Connect in the background, if not already.
     pub fn connect(&mut self, id: &str, session: Option<String>) {
+        self.paused.remove(id);
         if let Some((config, host)) = self.boxes.iter_mut().find(|(c, _)| c.id == id)
             && host.is_none()
         {
@@ -264,20 +279,31 @@ impl Boxes {
     }
     /// Close cleanly, so the server drops this client at once.
     pub fn disconnect(&mut self, id: &str) {
+        self.paused.remove(id);
         if let Some((_, host)) = self.boxes.iter_mut().find(|(c, _)| c.id == id) {
             *host = None;
         }
     }
 
     pub fn snapshots(&self) -> Vec<(String, Snapshot)> {
-        self.boxes
-            .iter()
-            .filter_map(|(c, h)| Some((c.id.clone(), h.as_ref()?.snapshot())))
-            .collect()
+        self.boxes.iter().filter_map(|(c, _)| Some((c.id.clone(), self.snapshot(&c.id)?))).collect()
     }
 
     pub fn snapshot(&self, id: &str) -> Option<Snapshot> {
-        self.host(id).map(Host::snapshot)
+        self.host(id).map(Host::snapshot).or_else(|| self.paused.get(id).cloned())
+    }
+
+    /// Stop retrying a box whose login keeps being refused, keeping what was last seen with
+    /// why. Connecting again, or a fix that reconnects, starts it afresh.
+    pub fn pause_stuck(&mut self) {
+        for (config, host) in &mut self.boxes {
+            let Some(now) = host.as_ref().map(Host::snapshot) else { continue };
+            if !now.connected && now.problem.as_ref().is_some_and(stuck) {
+                *host = None;
+                let status = format!("{} · Paused, since each retry is another refused login there.", now.status);
+                self.paused.insert(config.id.clone(), Snapshot { status: crate::plain(&status, 400), ..now });
+            }
+        }
     }
 
     pub fn wakes(&self) -> Vec<(String, Wake)> {
@@ -427,6 +453,12 @@ mod tests {
         assert!(Boxes::load(&path).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{oops");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn only_refused_logins_stop_retrying() {
+        assert!(stuck(&Problem::Auth) && stuck(&Problem::UnknownHostKey) && stuck(&Problem::ChangedHostKey));
+        assert!(!stuck(&Problem::NoServer { start: true, install: false }), "a server may start");
     }
 
     #[test]

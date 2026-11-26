@@ -44,6 +44,9 @@ pub struct Agent {
     pub since: Option<Instant>,
     /// Percent, if it says.
     pub progress: Option<u8>,
+    /// Reported while this client was connected; otherwise read back on connecting, and
+    /// possibly older than it looks.
+    pub live: bool,
 }
 
 impl Agent {
@@ -108,6 +111,8 @@ pub struct Snapshot {
     /// Panes in the tab on screen, shown or hidden behind a zoomed one.
     pub tab_panes: usize,
     pub status: String,
+    /// Why an `ssh://` box isn't connected, when the core could tell.
+    pub problem: Option<crate::Problem>,
     pub notice: Option<String>,
     pub sessions: Vec<Session>,
     pub session: Option<String>,
@@ -150,6 +155,7 @@ impl Snapshot {
             connected: m.connected,
             tab_panes: window.map_or(0, |w| w.layers.iter().flat_map(|l| &l.blocks).count()),
             status: plain(&m.status, 300),
+            problem: None,
             notice: m.notice.as_deref().map(|n| plain(n, 300)),
             sessions,
             session: m.selected.clone(),
@@ -304,6 +310,7 @@ fn agent(
         place: format!("{} / {tab}", plain(session_label, 40)),
         since: r.age.and_then(|a| a.observed.checked_sub(a.initial)),
         progress: r.progress,
+        live: r.live,
     }
 }
 

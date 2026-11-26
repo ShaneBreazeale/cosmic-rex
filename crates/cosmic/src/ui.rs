@@ -386,7 +386,7 @@ pub fn sidebar<'a>(rows: Vec<BoxRow<'a>>, current: Option<&str>) -> Element<'a, 
         // Quiet when all is well; words when not.
         let link = match row.now {
             None => Some("⦸ Disconnected"),
-            Some(s) if !s.connected => Some("◌ Not connected"),
+            Some(s) if !s.connected => Some(s.problem.as_ref().map_or("◌ Not connected", |p| p.badge())),
             Some(_) => None,
         };
         if let Some(link) = link {
@@ -555,7 +555,9 @@ pub fn inbox<'a>(items: Vec<(&'a BoxConfig, &'a Snapshot, &'a Agent)>) -> Elemen
                         })),
                 );
             }
-            card = card.push(muted(format!("reports itself as {}", a.app)));
+            // Why it shows here: programs report their own state; nothing is read off the screen.
+            let heard = if a.live { "reported while connected" } else { "read back on connecting" };
+            card = card.push(muted(format!("{} says so itself · {heard}", a.app)));
             list = list.push(
                 widget::button::custom(card.padding(12).width(Length::Fill))
                     .width(Length::Fill)
