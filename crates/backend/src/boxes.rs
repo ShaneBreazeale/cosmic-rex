@@ -83,6 +83,10 @@ impl BoxConfig {
     pub fn is_local(&self) -> bool {
         self.endpoint == LOCAL
     }
+    /// Reached with `ssh`, so it can take this computer's key.
+    pub fn is_ssh(&self) -> bool {
+        self.endpoint.starts_with("ssh://")
+    }
 }
 
 /// Accept `user@host` as SSH and `local` as this computer; otherwise require a full address the

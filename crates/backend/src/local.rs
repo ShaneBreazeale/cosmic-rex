@@ -240,7 +240,8 @@ const TERM_ENV: [(&str, &str); 3] =
     [("TERM", "xterm-256color"), ("COLORTERM", "truecolor"), ("TERM_PROGRAM", "cosmic-rex")];
 
 enum Op {
-    Spawn { block: String, cwd: Option<PathBuf>, size: (u16, u16) },
+    /// A shell, or `program` (its argv) in its place.
+    Spawn { block: String, cwd: Option<PathBuf>, size: (u16, u16), program: Option<Vec<String>> },
     Key(String, Key),
     Paste(String, String),
     Mouse(String, mouse::Action, mouse::Button, (u16, u16), String),
@@ -308,8 +309,15 @@ impl Local {
         }
     }
     fn open_session(&self, st: &mut State) {
+        self.open_program(st, None, None);
+    }
+    /// A session with one pane running `program`, or a shell.
+    fn open_program(&self, st: &mut State, label: Option<&str>, program: Option<Vec<String>>) {
         let (session, window, block) = (st.id("session"), st.id("window"), st.id("block"));
-        let label = st.unique_label();
+        let label = match label {
+            Some(l) if st.sessions.iter().all(|s| s.label != l) => l.to_owned(),
+            _ => st.unique_label(),
+        };
         st.sessions.push(LocalSession {
             id: session.clone(),
             label,
@@ -323,12 +331,14 @@ impl Local {
             active: 0,
         });
         st.selected = Some(session);
-        self.spawn(st, block, None, FIRST_SIZE);
+        st.notice = None;
+        st.panes.insert(block.clone(), PaneInfo { size: Some(FIRST_SIZE), ..Default::default() });
+        self.send(Op::Spawn { block, cwd: None, size: FIRST_SIZE, program });
     }
     fn spawn(&self, st: &mut State, block: String, cwd: Option<PathBuf>, size: (u16, u16)) {
         st.notice = None;
         st.panes.insert(block.clone(), PaneInfo { size: Some(size), ..Default::default() });
-        self.send(Op::Spawn { block, cwd, size });
+        self.send(Op::Spawn { block, cwd, size, program: None });
     }
 
     pub(crate) fn snapshot(&self) -> Snapshot {
@@ -495,6 +505,15 @@ impl Local {
         drop(st);
         self.changed();
     }
+    /// A new session named `label` (if free) whose one pane runs `program`, shown at once. Its
+    /// pane closes when the program ends, as a shell's does.
+    pub(crate) fn run(&self, label: &str, program: Vec<String>) {
+        let mut st = self.lock();
+        st.started = true;
+        self.open_program(&mut st, Some(label), Some(program));
+        drop(st);
+        self.changed();
+    }
     /// A new tab after the current one, starting in `block`'s folder.
     pub(crate) fn new_tab(&self, session: &str, block: &str) {
         let mut st = self.lock();
@@ -642,13 +661,17 @@ fn spawn(
     block: &str,
     cwd: Option<PathBuf>,
     (cols, rows): (u16, u16),
+    program: Option<Vec<String>>,
     output: &flume::Sender<Output>,
 ) -> Result<(Pane, Option<u32>), String> {
     let pair = native_pty_system()
         .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
         .map_err(|e| format!("{e:#}"))?;
     let dir = cwd.or_else(|| std::env::var_os("HOME").map(PathBuf::from)).unwrap_or_else(|| "/".into());
-    let mut command = CommandBuilder::new(shell());
+    let mut command = match program {
+        Some(argv) => CommandBuilder::from_argv(argv.into_iter().map(Into::into).collect()),
+        None => CommandBuilder::new(shell()),
+    };
     command.cwd(&dir);
     for (key, value) in TERM_ENV {
         command.env(key, value);
@@ -765,12 +788,12 @@ fn run(state: &Mutex<State>, notify: &flume::Sender<()>, ops: &flume::Receiver<O
 /// Act on one request. True if the layout changed.
 fn command(op: Op, panes: &mut HashMap<String, Pane>, state: &Mutex<State>, output: &flume::Sender<Output>) -> bool {
     match op {
-        Op::Spawn { block, cwd, size } => {
+        Op::Spawn { block, cwd, size, program } => {
             // Closed before it started.
             if !state.lock().expect("local state").panes.contains_key(&block) {
                 return false;
             }
-            match spawn(&block, cwd, size, output) {
+            match spawn(&block, cwd, size, program, output) {
                 Ok((pane, pid)) => {
                     if let Some(info) = state.lock().expect("local state").panes.get_mut(&block) {
                         info.pid = pid;

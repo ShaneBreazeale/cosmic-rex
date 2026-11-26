@@ -5,7 +5,7 @@ use cosmic::{
     iced::{Alignment, Background, Border, Color, Length},
     theme, widget,
 };
-use rex_backend::{Agent, AgentState, BoxConfig, Snapshot, WaitingFor};
+use rex_backend::{Agent, AgentState, BoxConfig, Snapshot, TailnetMachine, WaitingFor};
 
 /// Box identity only, never status. Dark enough for white text, far apart in hue and lightness.
 const TINTS: [Color; rex_backend::TINTS as usize] = [
@@ -396,6 +396,12 @@ pub fn sidebar<'a>(rows: Vec<BoxRow<'a>>, current: Option<&str>) -> Element<'a, 
             .extra_small()
             .tooltip("Edit name or address")
             .on_press(Message::EditBox(id.clone()));
+        let key = row.config.is_ssh().then(|| {
+            widget::button::icon(widget::icon::from_name("dialog-password-symbolic").symbolic(true))
+                .extra_small()
+                .tooltip("SSH key")
+                .on_press(Message::KeySheet(id.clone()))
+        });
         // Only this computer's own shells can be started from here.
         let new = (row.config.is_local() && online).then(|| {
             widget::button::icon(widget::icon::from_name("list-add-symbolic").symbolic(true))
@@ -404,7 +410,7 @@ pub fn sidebar<'a>(rows: Vec<BoxRow<'a>>, current: Option<&str>) -> Element<'a, 
                 .on_press(Message::NewSession(id.clone()))
         });
         list = list.push(
-            widget::row::with_capacity(3)
+            widget::row::with_capacity(4)
                 .spacing(2)
                 .align_y(Alignment::Center)
                 .push(
@@ -414,6 +420,7 @@ pub fn sidebar<'a>(rows: Vec<BoxRow<'a>>, current: Option<&str>) -> Element<'a, 
                         .on_press(Message::SelectBox(id.clone())),
                 )
                 .push_maybe(new)
+                .push_maybe(key)
                 .push(edit),
         );
         let Some(now) = row.now else { continue };
@@ -804,4 +811,43 @@ pub fn view_menu<'a>(v: ViewMenu) -> Element<'a, Message> {
     .item_width(widget::menu::ItemWidth::Uniform(260))
     .spacing(4.0)
     .into()
+}
+
+/// The add-box form's list of tailnet machines. Choosing one fills the address with plain SSH to
+/// it over the tailnet; one already in the list can't be chosen again.
+pub fn tailnet<'a>(
+    found: Option<&'a Result<Vec<TailnetMachine>, String>>,
+    address: &str,
+    taken: &[&str],
+) -> Element<'a, Message> {
+    let list = widget::column::with_capacity(8)
+        .spacing(4)
+        .push(widget::text::caption_heading("On your tailnet"));
+    let machines = match found {
+        None => return list.push(muted("Asking Tailscale…")).into(),
+        Some(Err(why)) => return list.push(muted(why.as_str())).into(),
+        Some(Ok(machines)) => machines,
+    };
+    let mut rows = widget::column::with_capacity(machines.len()).spacing(2);
+    for m in machines {
+        let added = taken.contains(&m.endpoint.as_str());
+        let mut about: Vec<&str> = Vec::with_capacity(3);
+        if !m.os.is_empty() {
+            about.push(&m.os);
+        }
+        about.push(if added { "added" } else if m.online { "online" } else { "offline" });
+        if m.tailscale_ssh {
+            about.push("Tailscale SSH answers port 22 here");
+        }
+        let lines = widget::column::with_capacity(2)
+            .push(one_line(widget::text::body(m.name.as_str())))
+            .push(one_line(faint(about.join(" · "))));
+        rows = rows.push(
+            widget::button::custom(lines.padding([2, 6]))
+                .width(Length::Fill)
+                .class(row_class(address.trim() == m.endpoint))
+                .on_press_maybe((!added).then(|| Message::PickMachine(m.endpoint.clone()))),
+        );
+    }
+    list.push(widget::container(widget::scrollable(rows)).max_height(220.0)).into()
 }

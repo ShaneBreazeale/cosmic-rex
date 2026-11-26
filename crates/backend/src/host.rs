@@ -171,6 +171,12 @@ impl Host {
             h.new_session();
         }
     }
+    /// A new session running `program` (its argv), named `label`. Only on this computer.
+    pub fn run(&self, label: &str, program: Vec<String>) {
+        if let Kind::Local(h) = &self.0 {
+            h.run(label, program);
+        }
+    }
     /// Take this pane's size, on the person's explicit request: every client viewing it re-wraps.
     /// Local panes always have this window's size.
     pub fn fit_here(&self, session: &str, block: &str) {

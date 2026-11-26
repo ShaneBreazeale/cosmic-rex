@@ -19,6 +19,8 @@ An unofficial [Rex](https://www.superlogical.com/rex) client for the COSMIC desk
   ![An answer sheet for an agent's question, with key buttons and a reply field](docs/images/answer.png)
 
 - **This computer's shells,** with no Rex server: choose "Use this computer" when adding a box, or enter `local` as the address. They have tabs and splits like any other box, and end when the app closes.
+- **Your tailnet's machines** are listed when adding a box, from the local `tailscale` command. Choosing one fills in `ssh://name.tailnet.ts.net`: plain SSH with your own keys over the tailnet, never `tailscale ssh`. A machine running Tailscale SSH is marked, since it answers port 22 there instead of sshd.
+- **SSH keys** for any `ssh://` box (the key button beside it): make a key, install it with `ssh-copy-id`, check that it logs in with passwords refused, and then turn off password login on that machine. Anything that asks for a passphrase, a password or sudo runs in a terminal on This computer, so the app never sees it. Turning passwords off writes `/etc/ssh/sshd_config.d/00-cosmic-rex-keys-only.conf`, which sshd checks before it is reloaded; it is only offered after the key check passes.
 - **Local echo** draws typing before the server confirms it, underlined until it does.
 - **Minimum contrast,** as in Ghostty: View → Minimum contrast moves text that is too close to its background toward black or white until it reaches 3:1, 4.5:1 or 7:1, keeping its hue. It is saved between runs.
 - **Nerd Font icons** in prompts and status lines draw without installing anything: the app bundles Symbols Nerd Font Mono ([MIT](docs/licenses/nerd-fonts.txt), v3.4.0).

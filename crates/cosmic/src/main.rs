@@ -15,7 +15,7 @@ use cosmic::{
 use futures_util::StreamExt as _;
 use grid::{Action, Cache, Grid, Identity, Metrics, Shortcut, Tab};
 use rex_backend::{
-    Agent, AgentState, AnswerKey, BoxConfig, Boxes, Host, Outcome, PaneView, Question, Reply, Snapshot, Split, Wake,
+    Agent, AgentState, AnswerKey, BoxConfig, Boxes, Host, Outcome, PaneView, Question, Reply, Snapshot, Split, KeyCheck, TailnetMachine, Wake,
     demo::Demo,
 };
 use std::{
@@ -132,6 +132,20 @@ enum Message {
     /// A new session with one shell, on this local box.
     NewSession(String),
     Draft(Field, String),
+    /// What the local Tailscale listed, for the add-box form.
+    Tailnet(Result<Vec<TailnetMachine>, String>),
+    /// Fill the add-box form with this tailnet machine's address.
+    PickMachine(String),
+    /// Open the SSH key sheet for this box.
+    KeySheet(String),
+    /// Key steps for the open key sheet. Those that may ask something run in a terminal here.
+    MakeKey,
+    InstallKey,
+    CheckKey,
+    /// What checking this box's key found.
+    Checked(String, KeyCheck),
+    AskKeysOnly,
+    KeysOnly,
     SaveBox,
     CancelDialog,
     AskRemove(String),
@@ -166,7 +180,14 @@ enum Field {
 /// What has the keyboard instead of the terminals.
 enum Dialog {
     /// Adding a box, or editing the one with this id.
-    Add { label: String, address: String, error: Option<String>, editing: Option<String> },
+    Add {
+        label: String,
+        address: String,
+        error: Option<String>,
+        editing: Option<String>,
+        /// The tailnet's machines, once Tailscale answers; only when adding.
+        tailnet: Option<Result<Vec<TailnetMachine>, String>>,
+    },
     Remove(BoxConfig),
     Fit { config: BoxConfig, session: String, block: String },
     Answer(Box<Answer>),
@@ -178,6 +199,10 @@ enum Dialog {
     /// Ends every tab in the session, so it asks, and Close stays inert until `armed`.
     CloseSession { config: BoxConfig, session: String, label: String, tabs: Option<usize>, number: u64, armed: bool },
     RenameSession { config: BoxConfig, session: String, label: String },
+    /// This computer's key and an `ssh://` box. `check` is the last check of it, if any.
+    Key { config: BoxConfig, checking: bool, check: Option<KeyCheck> },
+    /// Turns off password login on the box, so it asks, and stays inert until `armed`.
+    KeysOnly { config: BoxConfig, number: u64, armed: bool },
 }
 
 /// An open answer sheet. Results carry its number, so a late one can't land in another sheet.
@@ -341,6 +366,40 @@ impl App {
         let Some(window) = self.core.main_window_id() else { return Task::none() };
         self.title.clone_from(&title);
         self.set_window_title(title, window)
+    }
+
+    /// Run a program that may ask something in a new terminal on This computer, adding that box
+    /// if there is none, and show it.
+    fn run_here(&mut self, label: &str, program: Vec<String>) -> Task<Message> {
+        let here = self.boxes.iter().find(|c| c.is_local()).map(|c| c.id.clone());
+        let id = match here {
+            Some(id) => id,
+            None => {
+                let added = BoxConfig::new("", rex_backend::LOCAL, &self.boxes.configs())
+                    .and_then(|new| {
+                        let id = new.id.clone();
+                        self.boxes.add(new).map(|()| id)
+                    });
+                match added {
+                    Ok(id) => id,
+                    Err(e) => return self.key_said(KeyCheck::Fails(e)),
+                }
+            }
+        };
+        self.boxes.connect(&id, None);
+        let Some(host) = self.boxes.host(&id) else { return Task::none() };
+        host.run(label, program);
+        self.dialog = None;
+        let shown = self.show_box(&id);
+        Task::batch([shown, self.refresh()])
+    }
+
+    /// Put words on the open key sheet.
+    fn key_said(&mut self, said: KeyCheck) -> Task<Message> {
+        if let Some(Dialog::Key { checking, check, .. }) = &mut self.dialog {
+            (*checking, *check) = (false, Some(said));
+        }
+        Task::none()
     }
 
     fn show_box(&mut self, id: &str) -> Task<Message> {
@@ -633,7 +692,7 @@ impl Application for App {
     fn dialog(&self) -> Option<Element<'_, Message>> {
         let cancel = || widget::button::standard("Cancel").on_press(Message::CancelDialog);
         Some(match self.dialog.as_ref()? {
-            Dialog::Add { label, address, error, editing } => {
+            Dialog::Add { label, address, error, editing, tailnet } => {
                 let mut form = widget::column::with_capacity(4)
                     .spacing(12)
                     .push(
@@ -653,6 +712,10 @@ impl Application for App {
                         widget::button::text("Use this computer: shells without Rex")
                             .on_press(Message::DraftThisComputer),
                     );
+                }
+                if editing.is_none() {
+                    let taken: Vec<&str> = self.boxes.iter().map(|c| c.endpoint.as_str()).collect();
+                    form = form.push(ui::tailnet(tailnet.as_ref(), address, &taken));
                 }
                 if let Some(error) = error {
                     form = form.push(widget::text::body(error.as_str()));
@@ -791,6 +854,55 @@ impl Application for App {
                     session.clone(),
                     block.clone(),
                 )))
+                .secondary_action(cancel())
+                .into(),
+            Dialog::Key { config, checking, check } => {
+                let key = rex_backend::own_key();
+                let mut steps = widget::column::with_capacity(4).spacing(8);
+                steps = steps.push(widget::text::body(match &key {
+                    Some(path) => format!("This computer's key: {}", path.display()),
+                    None => "This computer has no SSH key yet.".to_owned(),
+                }));
+                let said = match (checking, check) {
+                    (true, _) => Some("Checking…".to_owned()),
+                    (_, Some(KeyCheck::Works)) => Some(format!("Your key logs in to {} with passwords refused.", config.label)),
+                    (_, Some(KeyCheck::TailscaleSsh)) => Some(
+                        "Tailscale SSH answered, not sshd: the tailnet's policy decides who gets in on this address, and sshd's password setting doesn't apply to it. Turn Tailscale SSH off on that machine (tailscale set --ssh=false) to use your key."
+                            .to_owned(),
+                    ),
+                    (_, Some(KeyCheck::Fails(why))) => Some(why.clone()),
+                    (false, None) => None,
+                };
+                if let Some(said) = said {
+                    steps = steps.push(widget::text::body(said));
+                }
+                let mut buttons = widget::row::with_capacity(4).spacing(8);
+                buttons = match key {
+                    None => buttons.push(widget::button::suggested("Make a key").on_press(Message::MakeKey)),
+                    Some(_) => buttons
+                        .push(widget::button::standard("Install key").on_press(Message::InstallKey))
+                        .push(widget::button::standard("Check key").on_press_maybe((!checking).then_some(Message::CheckKey))),
+                };
+                steps = steps.push(buttons);
+                if matches!(check, Some(KeyCheck::Works)) && !checking {
+                    steps = steps.push(
+                        widget::button::text("Turn off password login…").on_press(Message::AskKeysOnly),
+                    );
+                }
+                widget::dialog()
+                    .title(format!("SSH key for {}", config.label))
+                    .body("Steps that ask for a passphrase, a password or sudo run in a terminal on This computer, so you answer them there. This app never sees them.")
+                    .control(steps)
+                    .secondary_action(widget::button::standard("Done").on_press(Message::CancelDialog))
+                    .into()
+            }
+            Dialog::KeysOnly { config, armed, .. } => widget::dialog()
+                .title(format!("Turn off password login on {}?", config.label))
+                .body("Its sshd will accept keys only, for every account. Anyone without a key, including you on another computer, can no longer log in with a password. It runs with sudo in a terminal here; sshd checks the change before reloading, and it is taken back out if sshd rejects it. To undo it, remove /etc/ssh/sshd_config.d/00-cosmic-rex-keys-only.conf there and reload sshd.")
+                .primary_action(
+                    widget::button::destructive("Turn off password login")
+                        .on_press_maybe(armed.then_some(Message::KeysOnly)),
+                )
                 .secondary_action(cancel())
                 .into(),
         })
@@ -1023,7 +1135,8 @@ impl Application for App {
                 if let Some(
                     Dialog::CloseTab { number, armed, .. }
                     | Dialog::CloseSession { number, armed, .. }
-                    | Dialog::ClosePane { number, armed, .. },
+                    | Dialog::ClosePane { number, armed, .. }
+                    | Dialog::KeysOnly { number, armed, .. },
                 ) = &mut self.dialog
                     && *number == n
                 {
@@ -1128,7 +1241,77 @@ impl Application for App {
                     address: String::new(),
                     error: None,
                     editing: None,
+                    tailnet: None,
                 });
+                return Task::perform(rex_backend::tailnet(), |found| cosmic::Action::App(Message::Tailnet(found)));
+            }
+            Message::Tailnet(found) => {
+                if let Some(Dialog::Add { tailnet, editing: None, .. }) = &mut self.dialog {
+                    *tailnet = Some(found);
+                }
+            }
+            Message::PickMachine(endpoint) => {
+                if let Some(Dialog::Add { address, error, .. }) = &mut self.dialog {
+                    *address = endpoint;
+                    *error = None;
+                }
+            }
+            Message::KeySheet(id) => {
+                self.dialog = self.boxes.config(&id).cloned().map(|config| Dialog::Key { config, checking: false, check: None });
+            }
+            Message::MakeKey => {
+                return match rex_backend::make_key_program() {
+                    Ok(program) => self.run_here("Make SSH key", program),
+                    Err(e) => self.key_said(KeyCheck::Fails(e)),
+                };
+            }
+            Message::InstallKey => {
+                let Some(Dialog::Key { config, .. }) = &self.dialog else { return Task::none() };
+                return match rex_backend::install_key_program(&config.endpoint) {
+                    Ok(program) => {
+                        let label = format!("Install key on {}", config.label);
+                        self.run_here(&label, program)
+                    }
+                    Err(e) => self.key_said(KeyCheck::Fails(e)),
+                };
+            }
+            Message::CheckKey => {
+                let Some(Dialog::Key { config, checking, .. }) = &mut self.dialog else { return Task::none() };
+                *checking = true;
+                let (id, endpoint) = (config.id.clone(), config.endpoint.clone());
+                return Task::perform(rex_backend::check_key(endpoint), move |found| {
+                    cosmic::Action::App(Message::Checked(id.clone(), found))
+                });
+            }
+            Message::Checked(id, found) => {
+                if let Some(Dialog::Key { config, checking, check }) = &mut self.dialog
+                    && config.id == id
+                {
+                    (*checking, *check) = (false, Some(found));
+                }
+            }
+            Message::AskKeysOnly => {
+                // Only from a sheet whose last check found the key working.
+                let Some(Dialog::Key { config, check: Some(KeyCheck::Works), checking: false }) = &self.dialog else {
+                    return Task::none();
+                };
+                self.sheets += 1;
+                let number = self.sheets;
+                self.dialog = Some(Dialog::KeysOnly { config: config.clone(), number, armed: false });
+                return Task::perform(rex_backend::pause(Duration::from_millis(600)), move |()| {
+                    cosmic::Action::App(Message::DialogArmed(number))
+                });
+            }
+            Message::KeysOnly => {
+                let Some(Dialog::KeysOnly { config, armed: true, .. }) = &self.dialog else { return Task::none() };
+                let config = config.clone();
+                return match rex_backend::keys_only_program(&config.endpoint) {
+                    Ok(program) => self.run_here(&format!("Keys only on {}", config.label), program),
+                    Err(e) => {
+                        self.dialog = Some(Dialog::Key { config, checking: false, check: Some(KeyCheck::Fails(e)) });
+                        Task::none()
+                    }
+                };
             }
             Message::DraftThisComputer => {
                 if let Some(Dialog::Add { address, error, .. }) = &mut self.dialog {
@@ -1142,6 +1325,7 @@ impl Application for App {
                     address: rex_backend::LOCAL.to_owned(),
                     error: None,
                     editing: None,
+                    tailnet: None,
                 });
                 return self.update(Message::SaveBox);
             }
@@ -1158,6 +1342,7 @@ impl Application for App {
                     address: c.endpoint.clone(),
                     error: None,
                     editing: Some(c.id.clone()),
+                    tailnet: None,
                 });
             }
             Message::Draft(field, value) => {
@@ -1170,7 +1355,7 @@ impl Application for App {
                 }
             }
             Message::SaveBox => {
-                let Some(Dialog::Add { label, address, error, editing }) = &mut self.dialog else {
+                let Some(Dialog::Add { label, address, error, editing, .. }) = &mut self.dialog else {
                     return Task::none();
                 };
                 let all = self.boxes.configs();
@@ -1394,7 +1579,12 @@ impl Application for App {
                         widget::button::text("Remove…")
                             .on_press(Message::AskRemove(config.id.clone()))
                             .into(),
-                    ],
+                    ]
+                    .into_iter()
+                    .chain(config.is_ssh().then(|| {
+                        widget::button::standard("SSH key…").on_press(Message::KeySheet(config.id.clone())).into()
+                    }))
+                    .collect(),
                 )
             };
             let body = if config.is_local() && now.sessions.is_empty() {

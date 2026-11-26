@@ -10,15 +10,19 @@ pub mod demo;
 mod frame;
 mod host;
 mod input;
+mod keys;
 mod local;
 mod model;
 mod predict;
+mod tailnet;
 
 pub use answer::{AnswerKey, Asker, Outcome, Question, Reply, Ticket, pause};
 pub use boxes::{BoxConfig, Boxes, LOCAL, TINTS};
 pub use frame::{CellRef, CursorShape, Frame, Underline};
 pub use host::{Button, Host, Key, KeyAction, Mouse, Pointer, Select, Split, Wake};
+pub use keys::{KeyCheck, check_key, install_key_program, keys_only_program, make_key_program, own_key};
 pub use predict::set_local_echo;
+pub use tailnet::{TailnetMachine, tailnet};
 pub use model::{Agent, AgentState, PaneView, Session, Size, Snapshot, Tab, WaitingFor, plain};
 
 /// Call once before anything else.
